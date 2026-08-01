@@ -55,7 +55,7 @@ part_path() {
     [[ "$part" =~ ^[1-9][0-9]*$ ]] || die "Invalid partition number: $part"
 
     case "$disk" in
-        /dev/mmcblk* | /dev/nvme*n*) printf '%sp%s\n' "$disk" "$part" ;;
+        /dev/mmcblk* | /dev/nvme*n* | /dev/loop*) printf '%sp%s\n' "$disk" "$part" ;;
         /dev/*) printf '%s%s\n' "$disk" "$part" ;;
         *) die "Invalid disk path: $disk" ;;
     esac
