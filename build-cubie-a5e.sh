@@ -22,14 +22,22 @@ AIC_REPO="${AIC_REPO:-$BUILD_ROOT/aic8800-radxa}"
 ROOTFS_DIR="${ROOTFS_DIR:-$BUILD_ROOT/rootfs}"
 BASE_IMAGE_BUILDER="${BASE_IMAGE_BUILDER:-$SCRIPT_DIR/base/build-debian13-donor-image.sh}"
 STOCK_IMG_XZ="${STOCK_IMG_XZ:-$INPUT_DIR/radxa-cubie-a5e_bullseye_cli_r7.output_512.img.xz}"
+REQUESTED_TARGET_DEVICE="${TARGET_DEVICE:-}"
 TARGET_DEVICE="${TARGET_DEVICE:-/dev/sdb}"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 JOBS="${JOBS:-$(nproc)}"
 CONFIRM_WRITE="${CONFIRM_WRITE:-0}"
 BUILD_MODE="${BUILD_MODE:-image}"
+OUTPUT_MODE="${OUTPUT_MODE:-device}"
 
 BUILD_ID="${BUILD_ID:-$(date -u '+%Y%m%dT%H%M%SZ')}"
 KERNEL_LOCALVERSION="${KERNEL_LOCALVERSION:-+cubie-a5e.${BUILD_ID}}"
+IMAGE_SIZE_GIB="${IMAGE_SIZE_GIB:-8}"
+IMAGE_XZ_LEVEL="${IMAGE_XZ_LEVEL:-6}"
+IMAGE_XZ_THREADS="${IMAGE_XZ_THREADS:-0}"
+IMAGE_OVERWRITE="${IMAGE_OVERWRITE:-0}"
+IMAGE_OUTPUT="${IMAGE_OUTPUT:-$BUILD_ROOT/images/cubie-a5e-debian13-linux6.16-${BUILD_ID}.img.xz}"
+IMAGE_RAW="${IMAGE_OUTPUT%.xz}"
 LOG_ROOT="${LOG_ROOT:-$BUILD_ROOT/logs}"
 LOG_DIR="${LOG_DIR:-$LOG_ROOT/$BUILD_ID}"
 BUILD_LOG="$LOG_DIR/build.log"
@@ -47,6 +55,7 @@ CURRENT_STAGE_STARTED_UTC=""
 BUILD_START_EPOCH="$(date +%s)"
 BUILD_SUCCEEDED=0
 LOCK_FD=""
+IMAGE_LOOP_DEVICE=""
 
 readonly BUILD_ROOT
 readonly DOWNLOAD_DIR
@@ -56,13 +65,20 @@ readonly AIC_REPO
 readonly ROOTFS_DIR
 readonly BASE_IMAGE_BUILDER
 readonly STOCK_IMG_XZ
-readonly TARGET_DEVICE
+readonly REQUESTED_TARGET_DEVICE
 readonly CROSS_COMPILE
 readonly JOBS
 readonly CONFIRM_WRITE
 readonly BUILD_MODE
+readonly OUTPUT_MODE
 readonly BUILD_ID
 readonly KERNEL_LOCALVERSION
+readonly IMAGE_SIZE_GIB
+readonly IMAGE_XZ_LEVEL
+readonly IMAGE_XZ_THREADS
+readonly IMAGE_OVERWRITE
+readonly IMAGE_OUTPUT
+readonly IMAGE_RAW
 readonly LOG_ROOT
 readonly LOG_DIR
 readonly BUILD_LOG
@@ -82,7 +98,7 @@ export STOCK_IMAGE_URL STOCK_IMAGE_SHA512
 export TARGET_DEVICE
 export CROSS_COMPILE JOBS CONFIRM_WRITE BUILD_ID LOG_ROOT LOG_DIR
 export BUILD_LOG COMMAND_LOG ENVIRONMENT_LOG STAGE_LOG FAILURE_LOG
-export TARGET_LOG SUMMARY_LOG CURRENT_STAGE STAGE_NAME BUILD_MODE
+export TARGET_LOG SUMMARY_LOG CURRENT_STAGE STAGE_NAME BUILD_MODE OUTPUT_MODE
 export KERNEL_LOCALVERSION
 
 stages=("10-prepare-host.sh")
@@ -166,7 +182,15 @@ capture_environment() {
         printf 'Debian rootfs: %s\n' "$ROOTFS_DIR"
         printf 'Base image builder: %s\n' "$BASE_IMAGE_BUILDER"
         printf 'Stock Radxa image: %s\n' "$STOCK_IMG_XZ"
+        printf 'Output mode: %s\n' "$OUTPUT_MODE"
         printf 'Target device: %s\n' "$TARGET_DEVICE"
+        if [[ "$BUILD_MODE" == "image" && "$OUTPUT_MODE" == "etcher-image" ]]; then
+            printf 'Image output: %s\n' "$IMAGE_OUTPUT"
+            printf 'Raw image working file: %s\n' "$IMAGE_RAW"
+            printf 'Image size GiB: %s\n' "$IMAGE_SIZE_GIB"
+            printf 'Image xz level: %s\n' "$IMAGE_XZ_LEVEL"
+            printf 'Image xz threads: %s\n' "$IMAGE_XZ_THREADS"
+        fi
         printf 'Cross compiler: %s\n' "$CROSS_COMPILE"
         printf 'Jobs: %s\n' "$JOBS"
         printf 'Confirmation mode: %s\n' "$CONFIRM_WRITE"
@@ -195,6 +219,48 @@ release_build_lock() {
     if [[ -n "$LOCK_FD" ]]; then
         flock -u "$LOCK_FD" 2>/dev/null || true
     fi
+}
+
+detach_image_loop() {
+    local strict="${1:-0}"
+    local mountpoint_path
+    local remaining_mounts
+
+    [[ -n "$IMAGE_LOOP_DEVICE" ]] || return 0
+
+    while IFS= read -r mountpoint_path; do
+        [[ -n "$mountpoint_path" ]] || continue
+        umount "$mountpoint_path" 2>/dev/null || true
+    done < <(
+        lsblk -lnpo MOUNTPOINTS "$IMAGE_LOOP_DEVICE" 2>/dev/null |
+            awk 'NF > 0 && $1 != "" {print $1}' |
+            sort -r
+    )
+
+    sync
+
+    remaining_mounts="$(
+        lsblk -lnpo MOUNTPOINTS "$IMAGE_LOOP_DEVICE" 2>/dev/null |
+            awk 'NF > 0 && $1 != "" {print $1}'
+    )"
+
+    if [[ -n "$remaining_mounts" ]]; then
+        if [[ "$strict" == "1" ]]; then
+            printf '%s\n' "$remaining_mounts" >&2
+            die "Image loop still has mounted filesystems: $IMAGE_LOOP_DEVICE"
+        fi
+        return 0
+    fi
+
+    if ! losetup -d "$IMAGE_LOOP_DEVICE" 2>/dev/null; then
+        if [[ "$strict" == "1" ]]; then
+            die "Failed to detach image loop device: $IMAGE_LOOP_DEVICE"
+        fi
+        return 0
+    fi
+
+    udevadm settle 2>/dev/null || true
+    IMAGE_LOOP_DEVICE=""
 }
 
 finish_current_stage() {
@@ -280,6 +346,7 @@ on_exit() {
     local exit_code="$?"
     local elapsed
 
+    detach_image_loop 0
     release_build_lock
     elapsed=$(($(date +%s) - BUILD_START_EPOCH))
 
@@ -386,15 +453,150 @@ validate_paths() {
 require_host_commands() {
     local commands=(
         awk bash blockdev date df findmnt flock grep head lsblk make
-        mountpoint nproc readlink sed sync tee udevadm umount
+        mountpoint nproc readlink sed sha256sum sort sync tee udevadm umount
     )
     local command_name
+
+    if [[ "$BUILD_MODE" == "image" && "$OUTPUT_MODE" == "etcher-image" ]]; then
+        commands+=(losetup truncate xz)
+    fi
 
     for command_name in "${commands[@]}"; do
         command -v "$command_name" >/dev/null 2>&1 ||
             die "Required host command is missing: $command_name"
     done
 
+}
+
+validate_output_settings() {
+    local build_root_real
+    local image_output_real
+    local image_raw_real
+
+    case "$OUTPUT_MODE" in
+        device | etcher-image) ;;
+        *) die "OUTPUT_MODE must be device or etcher-image, got: $OUTPUT_MODE" ;;
+    esac
+
+    case "$IMAGE_OVERWRITE" in
+        0 | 1) ;;
+        *) die "IMAGE_OVERWRITE must be 0 or 1, got: $IMAGE_OVERWRITE" ;;
+    esac
+
+    [[ "$IMAGE_XZ_LEVEL" =~ ^[0-9]$ ]] ||
+        die "IMAGE_XZ_LEVEL must be one digit from 0 through 9."
+    [[ "$IMAGE_XZ_THREADS" =~ ^[0-9]+$ ]] ||
+        die "IMAGE_XZ_THREADS must be zero or a positive integer."
+
+    if [[ "$BUILD_MODE" != "image" ]]; then
+        return 0
+    fi
+
+    if [[ "$OUTPUT_MODE" == "device" ]]; then
+        return 0
+    fi
+
+    [[ -z "$REQUESTED_TARGET_DEVICE" ]] ||
+        die "Do not set TARGET_DEVICE when OUTPUT_MODE=etcher-image."
+
+    validate_integer "IMAGE_SIZE_GIB" "$IMAGE_SIZE_GIB"
+    ((IMAGE_SIZE_GIB >= 4)) ||
+        die "IMAGE_SIZE_GIB must be at least 4."
+
+    [[ "$IMAGE_OUTPUT" == *.img.xz ]] ||
+        die "IMAGE_OUTPUT must end in .img.xz: $IMAGE_OUTPUT"
+    [[ "$IMAGE_RAW" == *.img ]] ||
+        die "The raw image working path must end in .img: $IMAGE_RAW"
+
+    build_root_real="$(safe_realpath "$BUILD_ROOT")"
+    image_output_real="$(safe_realpath "$IMAGE_OUTPUT")"
+    image_raw_real="$(safe_realpath "$IMAGE_RAW")"
+
+    [[ "$image_output_real" == "$build_root_real/images/"* ]] ||
+        die "IMAGE_OUTPUT must be inside BUILD_ROOT/images: $image_output_real"
+    [[ "$image_raw_real" == "$build_root_real/images/"* ]] ||
+        die "Raw image must be inside BUILD_ROOT/images: $image_raw_real"
+    [[ ! -L "$IMAGE_OUTPUT" && ! -L "$IMAGE_RAW" ]] ||
+        die "Image output paths must not be symbolic links."
+
+    if [[ "$IMAGE_OVERWRITE" == "0" ]]; then
+        [[ ! -e "$IMAGE_OUTPUT" ]] ||
+            die "Image output already exists: $IMAGE_OUTPUT"
+        [[ ! -e "$IMAGE_RAW" ]] ||
+            die "Raw image working file already exists: $IMAGE_RAW"
+        [[ ! -e "$IMAGE_OUTPUT.sha256" ]] ||
+            die "Image checksum already exists: $IMAGE_OUTPUT.sha256"
+    fi
+}
+
+prepare_image_target() {
+    local expected_size
+    local actual_size
+    local backing_file
+
+    mkdir -p -- "$(dirname -- "$IMAGE_OUTPUT")"
+
+    if [[ "$IMAGE_OVERWRITE" == "1" ]]; then
+        rm -f -- "$IMAGE_OUTPUT" "$IMAGE_OUTPUT.sha256" "$IMAGE_RAW"
+    fi
+
+    expected_size=$((IMAGE_SIZE_GIB * 1024 * 1024 * 1024))
+    log "Creating sparse $IMAGE_SIZE_GIB GiB raw image: $IMAGE_RAW"
+    truncate -s "$expected_size" -- "$IMAGE_RAW"
+
+    IMAGE_LOOP_DEVICE="$(losetup --find --show --partscan "$IMAGE_RAW")"
+    [[ -b "$IMAGE_LOOP_DEVICE" ]] ||
+        die "Failed to create loop device for: $IMAGE_RAW"
+
+    TARGET_DEVICE="$IMAGE_LOOP_DEVICE"
+    export TARGET_DEVICE
+
+    actual_size="$(blockdev --getsize64 "$TARGET_DEVICE")"
+    [[ "$actual_size" == "$expected_size" ]] ||
+        die "Loop device size mismatch: expected=$expected_size actual=$actual_size"
+
+    [[ "$(lsblk -dnro TYPE "$TARGET_DEVICE" 2>/dev/null || true)" == "loop" ]] ||
+        die "Image target is not a loop device: $TARGET_DEVICE"
+
+    backing_file="$(losetup -nO BACK-FILE "$TARGET_DEVICE" | sed -n '1p')"
+    [[ "$(safe_realpath "$backing_file")" == "$(safe_realpath "$IMAGE_RAW")" ]] ||
+        die "Loop backing file mismatch: $backing_file"
+
+    lsblk -o NAME,PATH,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINTS \
+        "$TARGET_DEVICE" >"$TARGET_LOG"
+
+    log "Etcher image loop target: $TARGET_DEVICE"
+}
+
+finalize_image_output() {
+    local output_dir
+    local output_name
+
+    [[ "$OUTPUT_MODE" == "etcher-image" ]] || return 0
+
+    sync
+    detach_image_loop 1
+
+    log "Compressing validated image to: $IMAGE_OUTPUT"
+    xz \
+        --threads="$IMAGE_XZ_THREADS" \
+        "-$IMAGE_XZ_LEVEL" \
+        --check=crc64 \
+        --force \
+        -- "$IMAGE_RAW"
+
+    need_nonempty_file "$IMAGE_OUTPUT"
+
+    output_dir="$(dirname -- "$IMAGE_OUTPUT")"
+    output_name="$(basename -- "$IMAGE_OUTPUT")"
+    (
+        cd -- "$output_dir"
+        sha256sum -- "$output_name" >"$output_name.sha256"
+    )
+
+    need_nonempty_file "$IMAGE_OUTPUT.sha256"
+    log "Etcher image: $IMAGE_OUTPUT"
+    log "Image checksum: $IMAGE_OUTPUT.sha256"
 }
 
 validate_target_device() {
@@ -504,6 +706,7 @@ write_summary() {
         printf 'Completed UTC: %s\n' "$(timestamp)"
         printf 'Status: SUCCESS\n'
         printf 'Build mode: %s\n' "$BUILD_MODE"
+        printf 'Output mode: %s\n' "$OUTPUT_MODE"
         printf 'Duration: %s\n' "$(duration_text "$elapsed")"
         printf 'Kernel source: %s\n' "$KERNEL_DIR"
         printf 'AIC repository: %s\n' "$AIC_REPO"
@@ -512,8 +715,12 @@ write_summary() {
         printf 'Single-kernel steady state: yes\n'
         printf 'Persistent Linux 5.15 recovery entry retained: no\n'
 
-        if [[ "$BUILD_MODE" == "image" ]]; then
+        if [[ "$BUILD_MODE" == "image" && "$OUTPUT_MODE" == "device" ]]; then
             printf 'Target device: %s\n' "$TARGET_DEVICE"
+        elif [[ "$BUILD_MODE" == "image" ]]; then
+            printf 'Etcher image: %s\n' "$IMAGE_OUTPUT"
+            printf 'Etcher image SHA-256: %s\n' "$IMAGE_OUTPUT.sha256"
+            printf 'Uncompressed image size GiB: %s\n' "$IMAGE_SIZE_GIB"
         fi
 
         printf 'Expected GMAC0 interface: eth0\n'
@@ -554,21 +761,28 @@ main() {
         *) die "BUILD_MODE must be image or update-bundle, got: $BUILD_MODE" ;;
     esac
 
+    validate_output_settings
+
     [[ "$KERNEL_LOCALVERSION" =~ ^\+[A-Za-z0-9._+-]+$ ]] ||
         die "KERNEL_LOCALVERSION must start with + and contain only kernel-safe characters."
 
     validate_paths
     require_host_commands
     acquire_build_lock
-    capture_environment
     validate_source_inputs
 
     if [[ "$BUILD_MODE" == "image" ]]; then
-        validate_target_device
-        confirm_target_destruction
+        if [[ "$OUTPUT_MODE" == "device" ]]; then
+            validate_target_device
+            confirm_target_destruction
+        else
+            prepare_image_target
+        fi
         sync
         udevadm settle
     fi
+
+    capture_environment
 
     for stage in "${stages[@]}"; do
         run_stage "$stage"
@@ -578,6 +792,7 @@ main() {
 
     if [[ "$BUILD_MODE" == "image" ]]; then
         udevadm settle
+        finalize_image_output
     fi
 
     write_summary
@@ -590,12 +805,17 @@ main() {
     log "Build ID: $BUILD_ID"
     log "Total duration: $(duration_text "$total_elapsed")"
     log "Build mode: $BUILD_MODE"
+    log "Output mode: $OUTPUT_MODE"
     log "Kernel source: $KERNEL_DIR"
     log "Signed update bundle: $(<"$BUILD_ROOT/.one-shot-update-bundle")"
     log "Expected interfaces: GMAC0=eth0, GMAC1=eth1, AIC8800=wlan0"
 
-    if [[ "$BUILD_MODE" == "image" ]]; then
+    if [[ "$BUILD_MODE" == "image" && "$OUTPUT_MODE" == "device" ]]; then
         log "Target device: $TARGET_DEVICE"
+        log "Image contains one managed kernel and no Linux 5.15 recovery entry."
+    elif [[ "$BUILD_MODE" == "image" ]]; then
+        log "Etcher image: $IMAGE_OUTPUT"
+        log "Etcher image SHA-256: $IMAGE_OUTPUT.sha256"
         log "Image contains one managed kernel and no Linux 5.15 recovery entry."
     fi
 
