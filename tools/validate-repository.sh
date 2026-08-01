@@ -59,6 +59,17 @@ grep -Fxq \
     'AIC_EXPECTED_COMMIT="${AIC_EXPECTED_COMMIT:-6e076049b719ac2ff7ce5c92786a680407b11cdb}"' \
     "$PROJECT_ROOT/config/source-pins.env" || fail "AIC8800 pin is missing."
 
+grep -Fq 'OUTPUT_MODE="${OUTPUT_MODE:-device}"' \
+    "$PROJECT_ROOT/build-cubie-a5e.sh" || fail "Direct-device output default is missing."
+grep -Fq 'device | etcher-image)' \
+    "$PROJECT_ROOT/build-cubie-a5e.sh" || fail "Dual output-mode validation is missing."
+grep -Fq 'losetup --find --show --partscan' \
+    "$PROJECT_ROOT/build-cubie-a5e.sh" || fail "Etcher-image loop setup is missing."
+grep -Fq 'sha256sum -- "$output_name"' \
+    "$PROJECT_ROOT/build-cubie-a5e.sh" || fail "Etcher-image checksum generation is missing."
+grep -Fq '/dev/nvme*n*|/dev/mmcblk*|/dev/loop*)' \
+    "$PROJECT_ROOT/base/build-debian13-donor-image.sh" || fail "Loop partition naming support is missing."
+
 if [[ -s "$PROJECT_ROOT/MANIFEST.sha256" ]]; then
     (
         cd "$PROJECT_ROOT"
