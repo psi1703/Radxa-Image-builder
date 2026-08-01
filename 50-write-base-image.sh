@@ -16,6 +16,7 @@ export STAGE_NAME="BASEIMAGE"
 : "${TARGET_DEVICE:?TARGET_DEVICE is not set}"
 : "${BASE_IMAGE_BUILDER:?BASE_IMAGE_BUILDER is not set}"
 : "${ROOTFS_DIR:?ROOTFS_DIR is not set}"
+: "${OUTPUT_MODE:=device}"
 
 readonly ROOTFS_DIR
 readonly STOCK_IMG_XZ="${STOCK_IMG_XZ:-$BUILD_ROOT/downloads/radxa-cubie-a5e_bullseye_cli_r7.output_512.img.xz}"
@@ -108,8 +109,19 @@ script_dir_real="$(readlink -m -- "$SCRIPT_DIR")"
 
 target_type="$(lsblk -dnro TYPE "$TARGET_DEVICE" 2>/dev/null || true)"
 
-[[ "$target_type" == "disk" ]] ||
-    die "TARGET_DEVICE must be an entire disk: $TARGET_DEVICE"
+case "$target_type" in
+    disk)
+        [[ "$OUTPUT_MODE" == "device" ]] ||
+            die "A physical disk requires OUTPUT_MODE=device: $TARGET_DEVICE"
+        ;;
+    loop)
+        [[ "$OUTPUT_MODE" == "etcher-image" ]] ||
+            die "A loop target requires OUTPUT_MODE=etcher-image: $TARGET_DEVICE"
+        ;;
+    *)
+        die "TARGET_DEVICE must be an entire disk or managed image loop: $TARGET_DEVICE"
+        ;;
+esac
 
 case "$TARGET_DEVICE" in
     /dev/sda | /dev/vda | /dev/xvda | /dev/nvme0n1 | /dev/mmcblk0)
