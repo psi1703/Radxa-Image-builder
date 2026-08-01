@@ -1,0 +1,38 @@
+PASS bash -n: 10-prepare-host.sh
+PASS bash -n: 20-backport-gmac1.sh
+PASS bash -n: 25-apply-hardware-dts.sh
+PASS bash -n: 30-build-kernel.sh
+PASS bash -n: 40-build-aic8800.sh
+PASS bash -n: 50-write-base-image.sh
+PASS bash -n: 60-install-linux-6.16.sh
+PASS bash -n: 70-install-network-policy.sh
+PASS bash -n: 80-validate-image.sh
+PASS bash -n: build-cubie-a5e.sh
+PASS bash -n: lib/common.sh
+PASS executable permissions: all shell files
+PASS ShellCheck error-severity scan: all shell files
+PASS embedded Python syntax: 20-backport-gmac1.sh
+PASS embedded Python syntax: 25-apply-hardware-dts.sh
+PASS embedded Python syntax: 80-validate-image.sh
+PASS Linux 6.16 Wi-Fi backport transformer: repeat-run idempotence
+PASS synthetic DTB reads: phandles, GPIOs, voltages, delay and interrupt
+PASS GMAC1 validator requires PCK600 PD_VO1
+PASS GMAC1 validator requires CLDO4 and PJ16
+PASS Wi-Fi validator requires PL7-controlled 3.3 V
+PASS Wi-Fi validator keeps BLDO1 at 1.8 V
+PASS Wi-Fi validator requires PM1 reset and 200 ms power-on delay
+PASS Wi-Fi validator requires BLDO1 as the mmc1 1.8 V I/O supply
+PASS Wi-Fi validator requires PM0 host-wake interrupt
+PASS Wi-Fi validator requires the A523 pinctrl IRQ fixes
+PASS Wi-Fi validator requires the tested 40 MHz SDIO limit
+PASS AIC8800 build uses the generic Linux platform path
+PASS AIC8800 module policy matches the tested Radxa options
+PASS AIC8800D80 firmware path and file contents are validated
+PASS obsolete Sunxi RFKill/rescan module is excluded
+PASS obsolete Allwinner symbol imports are rejected
+PASS wireless regulatory database and signature are installed
+PASS upstream wireless regulatory signing key is built into cfg80211
+PASS inapplicable EFI automount is masked
+PASS no Markdown/writing-block markers in shell files
+PASS no trailing whitespace in shell files
+PASS common.sh runtime smoke test

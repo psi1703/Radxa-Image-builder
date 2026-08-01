@@ -1,0 +1,333 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 022
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
+
+export STAGE_NAME="BUNDLE"
+
+: "${BUILD_ROOT:?BUILD_ROOT is not set}"
+: "${KERNEL_DIR:?KERNEL_DIR is not set}"
+: "${AIC_REPO:?AIC_REPO is not set}"
+: "${CROSS_COMPILE:?CROSS_COMPILE is not set}"
+
+readonly KERNEL_RELEASE_FILE="$BUILD_ROOT/.one-shot-kernel-release"
+readonly AIC_MODULE_LIST="$BUILD_ROOT/.one-shot-aic-modules"
+readonly UPDATE_VERSION_FILE="$BUILD_ROOT/.one-shot-update-version"
+readonly UPDATE_BUNDLE_FILE="$BUILD_ROOT/.one-shot-update-bundle"
+readonly UPDATE_PUBLIC_KEY_FILE="$BUILD_ROOT/.one-shot-update-public-key"
+readonly IMAGE_SRC="$KERNEL_DIR/arch/arm64/boot/Image"
+readonly CONFIG_SRC="$KERNEL_DIR/.config"
+readonly DTB_SRC="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dtb"
+readonly FIRMWARE_SRC="$AIC_REPO/src/SDIO/driver_fw/fw/aic8800D80"
+readonly SIGNING_DIR="${SIGNING_DIR:-$BUILD_ROOT/update-signing}"
+readonly PRIVATE_KEY="${UPDATE_PRIVATE_KEY:-$SIGNING_DIR/cubie-a5e-update-private.pem}"
+readonly PUBLIC_KEY="${UPDATE_PUBLIC_KEY:-$SIGNING_DIR/cubie-a5e-update-public.pem}"
+readonly BUNDLE_OUTPUT_DIR="${BUNDLE_OUTPUT_DIR:-$BUILD_ROOT/update-bundles}"
+readonly BUNDLE_WORK_ROOT="${BUNDLE_WORK_ROOT:-$BUILD_ROOT/update-bundle-work}"
+
+if [[ -n "${LOG_DIR:-}" ]]; then
+    mkdir -p -- "$LOG_DIR"
+    readonly BUNDLE_REPORT="$LOG_DIR/update-bundle-report.txt"
+else
+    readonly BUNDLE_REPORT="$BUILD_ROOT/.one-shot-update-bundle-report.txt"
+fi
+
+KERNEL_RELEASE=""
+UPDATE_VERSION=""
+BUNDLE_PATH=""
+WORK_DIR=""
+PAYLOAD_ROOT=""
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 ||
+        die "Required command is missing: $1"
+}
+
+require_nonempty_file() {
+    [[ -s "$1" ]] ||
+        die "Required file is missing or empty: $1"
+}
+
+cleanup() {
+    if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+        rm -rf -- "$WORK_DIR"
+    fi
+}
+
+trap cleanup EXIT
+
+validate_inputs() {
+    local firmware_name
+    local module
+    local module_count=0
+
+    require_nonempty_file "$KERNEL_RELEASE_FILE"
+    require_nonempty_file "$AIC_MODULE_LIST"
+    require_nonempty_file "$IMAGE_SRC"
+    require_nonempty_file "$CONFIG_SRC"
+    require_nonempty_file "$DTB_SRC"
+    need_dir "$FIRMWARE_SRC"
+
+    for firmware_name in \
+        fw_patch_table_8800d80_u02.bin \
+        fw_adid_8800d80_u02.bin \
+        fw_patch_8800d80_u02.bin \
+        fmacfw_8800d80_u02.bin; do
+        require_nonempty_file "$FIRMWARE_SRC/$firmware_name"
+    done
+
+    KERNEL_RELEASE="$(tr -d '[:space:]' <"$KERNEL_RELEASE_FILE")"
+
+    [[ "$KERNEL_RELEASE" =~ ^[A-Za-z0-9._+-]+$ ]] ||
+        die "Invalid kernel release: $KERNEL_RELEASE"
+
+    while IFS= read -r module; do
+        [[ -n "$module" ]] || continue
+        require_nonempty_file "$module"
+        module_count=$((module_count + 1))
+    done <"$AIC_MODULE_LIST"
+
+    ((module_count == 2)) ||
+        die "AIC module manifest must contain exactly two modules."
+
+    grep -q '/aic8800_bsp\.ko$' "$AIC_MODULE_LIST" ||
+        die "AIC module manifest lacks aic8800_bsp.ko"
+    grep -q '/aic8800_fdrv\.ko$' "$AIC_MODULE_LIST" ||
+        die "AIC module manifest lacks aic8800_fdrv.ko"
+}
+
+ensure_signing_key() {
+    install -d -m 0700 -- "$SIGNING_DIR"
+
+    if [[ ! -s "$PRIVATE_KEY" ]]; then
+        log "Generating the persistent Cubie A5E update signing key."
+        openssl genpkey \
+            -algorithm RSA \
+            -pkeyopt rsa_keygen_bits:3072 \
+            -out "$PRIVATE_KEY"
+        chmod 0600 "$PRIVATE_KEY"
+    fi
+
+    openssl pkey \
+        -in "$PRIVATE_KEY" \
+        -pubout \
+        -out "$PUBLIC_KEY"
+
+    chmod 0600 "$PRIVATE_KEY"
+    chmod 0644 "$PUBLIC_KEY"
+    printf '%s\n' "$PUBLIC_KEY" >"$UPDATE_PUBLIC_KEY_FILE"
+
+    openssl pkey -in "$PRIVATE_KEY" -noout -check >/dev/null ||
+        die "The update private key failed validation."
+    openssl pkey -pubin -in "$PUBLIC_KEY" -noout >/dev/null ||
+        die "The update public key failed validation."
+}
+
+derive_update_version() {
+    local kernel_commit
+    local aic_commit
+
+    kernel_commit="$(git -C "$KERNEL_DIR" rev-parse --short=12 HEAD)"
+    aic_commit="$(git -C "$AIC_REPO" rev-parse --short=12 HEAD)"
+
+    [[ "$kernel_commit" =~ ^[0-9a-f]{12}$ ]] ||
+        die "Could not derive the kernel source revision."
+    [[ "$aic_commit" =~ ^[0-9a-f]{12}$ ]] ||
+        die "Could not derive the AIC8800 source revision."
+
+    UPDATE_VERSION="${KERNEL_RELEASE}+k${kernel_commit}.a${aic_commit}"
+    printf '%s\n' "$UPDATE_VERSION" >"$UPDATE_VERSION_FILE"
+}
+
+prepare_payload() {
+    local module
+    local module_destination
+    local firmware_source
+    local firmware_target
+
+    install -d -m 0755 -- "$BUNDLE_WORK_ROOT" "$BUNDLE_OUTPUT_DIR"
+    WORK_DIR="$(mktemp -d -p "$BUNDLE_WORK_ROOT" bundle.XXXXXX)"
+    PAYLOAD_ROOT="$WORK_DIR/payload/rootfs"
+
+    install -d -m 0755 -- "$PAYLOAD_ROOT"
+
+    log "Staging in-tree modules for signed update bundle."
+    make -C "$KERNEL_DIR" \
+        ARCH=arm64 \
+        CROSS_COMPILE="$CROSS_COMPILE" \
+        INSTALL_MOD_PATH="$PAYLOAD_ROOT" \
+        modules_install
+
+    rm -f -- \
+        "$PAYLOAD_ROOT/lib/modules/$KERNEL_RELEASE/build" \
+        "$PAYLOAD_ROOT/lib/modules/$KERNEL_RELEASE/source"
+
+    module_destination="$PAYLOAD_ROOT/lib/modules/$KERNEL_RELEASE/updates/aic8800"
+    install -d -m 0755 -- "$module_destination"
+
+    while IFS= read -r module; do
+        [[ -n "$module" ]] || continue
+        install -m 0644 -- "$module" "$module_destination/"
+    done <"$AIC_MODULE_LIST"
+
+    install -D -m 0644 \
+        "$IMAGE_SRC" \
+        "$PAYLOAD_ROOT/boot/vmlinuz-$KERNEL_RELEASE"
+    install -D -m 0644 \
+        "$CONFIG_SRC" \
+        "$PAYLOAD_ROOT/boot/config-$KERNEL_RELEASE"
+    install -D -m 0644 \
+        "$DTB_SRC" \
+        "$PAYLOAD_ROOT/usr/lib/linux-image-$KERNEL_RELEASE/allwinner/sun55i-a527-cubie-a5e.dtb"
+
+    firmware_source="$FIRMWARE_SRC"
+    firmware_target="$PAYLOAD_ROOT/lib/firmware/aic8800_fw/SDIO/aic8800D80"
+    need_dir "$firmware_source"
+    install -d -m 0755 -- "$firmware_target"
+    rsync -a "$firmware_source/" "$firmware_target/"
+}
+
+write_manifest() {
+    {
+        printf 'FORMAT_VERSION=1\n'
+        printf 'BOARD_ID=radxa-cubie-a5e\n'
+        printf 'UPDATE_TYPE=kernel\n'
+        printf 'UPDATE_VERSION=%s\n' "$UPDATE_VERSION"
+        printf 'KERNEL_RELEASE=%s\n' "$KERNEL_RELEASE"
+        printf 'MIN_UPDATER_VERSION=1\n'
+        printf 'KERNEL_SOURCE_COMMIT=%s\n' \
+            "$(git -C "$KERNEL_DIR" rev-parse HEAD)"
+        printf 'AIC_SOURCE_COMMIT=%s\n' \
+            "$(git -C "$AIC_REPO" rev-parse HEAD)"
+    } >"$WORK_DIR/manifest.env"
+}
+
+sign_and_package() {
+    local safe_version
+    local temporary_bundle
+
+    (
+        cd "$WORK_DIR"
+        find manifest.env payload \
+            -type f \
+            -print0 |
+            sort -z |
+            xargs -0 sha256sum >SHA256SUMS
+    )
+
+    openssl dgst \
+        -sha256 \
+        -sign "$PRIVATE_KEY" \
+        -out "$WORK_DIR/SHA256SUMS.sig" \
+        "$WORK_DIR/SHA256SUMS"
+
+    openssl dgst \
+        -sha256 \
+        -verify "$PUBLIC_KEY" \
+        -signature "$WORK_DIR/SHA256SUMS.sig" \
+        "$WORK_DIR/SHA256SUMS" >/dev/null ||
+        die "Generated bundle signature failed self-verification."
+
+    (
+        cd "$WORK_DIR"
+        sha256sum -c SHA256SUMS >/dev/null
+    ) || die "Generated bundle checksums failed self-verification."
+
+    safe_version="${UPDATE_VERSION//+/_}"
+    BUNDLE_PATH="$BUNDLE_OUTPUT_DIR/cubie-a5e-kernel-${safe_version}.tar.gz"
+    temporary_bundle="$BUNDLE_PATH.tmp"
+
+    tar -C "$WORK_DIR" \
+        -czf "$temporary_bundle" \
+        manifest.env \
+        SHA256SUMS \
+        SHA256SUMS.sig \
+        payload
+
+    tar -tzf "$temporary_bundle" >/dev/null ||
+        die "Generated update bundle failed archive validation."
+
+    mv -f -- "$temporary_bundle" "$BUNDLE_PATH"
+    printf '%s\n' "$BUNDLE_PATH" >"$UPDATE_BUNDLE_FILE"
+}
+
+write_report() {
+    local key_fingerprint
+
+    key_fingerprint="$(
+        openssl pkey \
+            -pubin \
+            -in "$PUBLIC_KEY" \
+            -outform DER |
+            sha256sum |
+            awk '{print $1}'
+    )"
+
+    {
+        printf 'Cubie A5E signed update bundle report\n'
+        printf '=====================================\n'
+        printf 'Status: PASS\n'
+        printf 'Update version: %s\n' "$UPDATE_VERSION"
+        printf 'Kernel release: %s\n' "$KERNEL_RELEASE"
+        printf 'Bundle: %s\n' "$BUNDLE_PATH"
+        printf 'Bundle SHA256: %s\n' "$(sha256sum "$BUNDLE_PATH" | awk '{print $1}')"
+        printf 'Signing public key: %s\n' "$PUBLIC_KEY"
+        printf 'Signing key fingerprint: %s\n' "$key_fingerprint"
+        printf 'Private key: %s\n' "$PRIVATE_KEY"
+        printf 'Private key installed in image: no\n'
+        printf 'Signature verification: PASS\n'
+        printf 'Checksum verification: PASS\n'
+    } >"$BUNDLE_REPORT"
+}
+
+main() {
+    local command_name
+
+    for command_name in \
+        awk \
+        find \
+        git \
+        install \
+        make \
+        mktemp \
+        mv \
+        openssl \
+        rsync \
+        sha256sum \
+        sort \
+        tar \
+        xargs; do
+        require_command "$command_name"
+    done
+
+    [[ "$(id -u)" -eq 0 ]] ||
+        die "Run this stage as root."
+
+    need_dir "$BUILD_ROOT"
+    need_dir "$KERNEL_DIR"
+    need_dir "$AIC_REPO"
+    need_file "$SCRIPT_DIR/assets/cubie-a5e-update"
+    need_file "$SCRIPT_DIR/assets/rsetup"
+    need_file "$SCRIPT_DIR/assets/cubie-a5e-update-finalize.service"
+    need_file "$SCRIPT_DIR/assets/99-cubie-a5e-managed-kernel"
+
+    validate_inputs
+    ensure_signing_key
+    derive_update_version
+    prepare_payload
+    write_manifest
+    sign_and_package
+    write_report
+
+    log "Signed update bundle created: $BUNDLE_PATH"
+    log "Back up the private signing key securely: $PRIVATE_KEY"
+    log "Bundle report: $BUNDLE_REPORT"
+}
+
+main "$@"

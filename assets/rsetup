@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+readonly RADXA_RSETUP="/usr/bin/rsetup"
+readonly CUBIE_UPDATE="/usr/local/sbin/cubie-a5e-update"
+
+rsetup_self_test() {
+    local command_name
+    local required_commands=(
+        apt-get
+        dtc
+        jq
+        nmcli
+        parted
+        python3
+        rfkill
+        sgdisk
+        sudo
+        u-boot-update
+        whiptail
+    )
+    local required_files=(
+        "$RADXA_RSETUP"
+        /usr/lib/librtui/tui.sh
+        /usr/lib/librtui/utils/utils.sh
+        /usr/lib/rsetup/cli/main.sh
+        /usr/lib/rsetup/tui/main.sh
+        /usr/lib/rsetup/tui/system/system.sh
+        /usr/lib/rsetup/tui/comm/comm.sh
+        /usr/lib/rsetup/tui/hardware/hardware.sh
+        /usr/lib/rsetup/tui/overlay/overlay.sh
+        /usr/lib/rsetup/tui/local/local.sh
+        /usr/lib/rsetup/tui/task/task.sh
+        /usr/lib/rsetup/tui/user/user.sh
+    )
+    local required_functions=(
+        __tui_main
+        __system
+        __hardware
+        __overlay
+        __comm
+        __user
+        __local
+        __task
+        system_update
+    )
+    local function_name
+    local required_file
+
+    for required_file in "${required_files[@]}"; do
+        [[ -s "$required_file" ]] || {
+            printf 'rsetup self-test: missing file: %s\n' "$required_file" >&2
+            return 1
+        }
+    done
+
+    [[ -x "$RADXA_RSETUP" ]] || {
+        printf 'rsetup self-test: not executable: %s\n' "$RADXA_RSETUP" >&2
+        return 1
+    }
+
+    for command_name in "${required_commands[@]}"; do
+        command -v "$command_name" >/dev/null 2>&1 || {
+            printf 'rsetup self-test: missing command: %s\n' "$command_name" >&2
+            return 1
+        }
+    done
+
+    export DEBUG=false
+    export LANG=C
+    export LANGUAGE=C
+    export LC_ALL=C
+
+    # shellcheck disable=SC1091
+    source /usr/lib/rsetup/cli/main.sh
+    # shellcheck disable=SC1091
+    source /usr/lib/rsetup/tui/main.sh
+
+    for function_name in "${required_functions[@]}"; do
+        declare -F "$function_name" >/dev/null || {
+            printf 'rsetup self-test: missing function: %s\n' "$function_name" >&2
+            return 1
+        }
+    done
+
+    printf 'rsetup self-test: PASS\n'
+}
+
+case "${1:-}" in
+    --self-test)
+        (($# == 1)) || {
+            printf 'Usage: rsetup --self-test\n' >&2
+            exit 2
+        }
+        rsetup_self_test
+        exit
+        ;;
+    "")
+        ;;
+    *)
+        exec "$RADXA_RSETUP" "$@"
+        ;;
+esac
+
+if ((EUID != 0)); then
+    exec sudo "$0"
+fi
+
+while true; do
+    choice="$(
+        whiptail \
+            --title "RSETUP" \
+            --menu "Please select an option below:" \
+            16 \
+            72 \
+            6 \
+            "radxa" "Radxa system configuration and package updates" \
+            "cubie" "Cubie A5E signed kernel and board updates" \
+            "exit" "Exit" \
+            3>&1 \
+            1>&2 \
+            2>&3
+    )" || exit 0
+
+    case "$choice" in
+        radxa)
+            "$RADXA_RSETUP"
+            ;;
+        cubie)
+            "$CUBIE_UPDATE" --tui
+            ;;
+        exit)
+            exit 0
+            ;;
+    esac
+done

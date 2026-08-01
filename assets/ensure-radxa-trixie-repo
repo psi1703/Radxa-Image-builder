@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 022
+
+readonly RADXA_REPO_URL="https://radxa-repo.github.io/trixie/"
+readonly RADXA_REPO_SUITE="trixie"
+readonly RADXA_REPO_FILE="/etc/apt/sources.list.d/70-trixie.list"
+readonly RADXA_KEYRING="/usr/share/keyrings/radxa-archive-keyring.gpg"
+readonly RADXA_KEYRING_VERSION="0.2.2"
+readonly RADXA_KEYRING_SHA256="3e3bb3d3150cf1dfa6c050d0c135f6a7f298b7638ff7e656fda711ababdb8a57"
+readonly RADXA_KEYRING_URL="${RADXA_REPO_URL}pool/main/r/radxa-archive-keyring/radxa-archive-keyring_${RADXA_KEYRING_VERSION}_all.deb"
+
+KEYRING_DEB=""
+
+die() {
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+cleanup() {
+    if [[ -n "$KEYRING_DEB" && -f "$KEYRING_DEB" ]]; then
+        rm -f -- "$KEYRING_DEB"
+    fi
+}
+
+trap cleanup EXIT
+
+package_has_candidate() {
+    local package="$1"
+
+    apt-cache policy "$package" |
+        awk '
+            $1 == "Candidate:" && $2 != "(none)" {
+                found = 1
+            }
+            END {
+                exit found ? 0 : 1
+            }
+        '
+}
+
+main() {
+    local actual_sha256
+    local expected_line
+    local installed_keyring_version
+
+    (($# == 0)) ||
+        die "This repository setup command does not accept arguments."
+
+    if ((EUID != 0)); then
+        exec sudo "$0"
+    fi
+
+    # shellcheck disable=SC1091
+    source /etc/os-release
+
+    [[ "${ID:-}" == "debian" &&
+       "${VERSION_ID:-}" == "13" &&
+       "${VERSION_CODENAME:-}" == "$RADXA_REPO_SUITE" ]] ||
+        die "The official Radxa Trixie repository requires Debian 13 (trixie)."
+
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+    apt-get install -y --no-install-recommends ca-certificates curl
+
+    installed_keyring_version="$(
+        dpkg-query -W -f='${Version}\n' \
+            radxa-archive-keyring 2>/dev/null || true
+    )"
+
+    if [[ ! -s "$RADXA_KEYRING" ]] ||
+       [[ -z "$installed_keyring_version" ]] ||
+       dpkg --compare-versions \
+            "$installed_keyring_version" \
+            lt \
+            "$RADXA_KEYRING_VERSION"; then
+        KEYRING_DEB="$(mktemp --suffix=.deb)"
+
+        curl \
+            --fail \
+            --location \
+            --proto '=https' \
+            --show-error \
+            --silent \
+            --tlsv1.2 \
+            --output "$KEYRING_DEB" \
+            "$RADXA_KEYRING_URL"
+
+        actual_sha256="$(sha256sum "$KEYRING_DEB" | awk '{print $1}')"
+        [[ "$actual_sha256" == "$RADXA_KEYRING_SHA256" ]] ||
+            die "The downloaded Radxa archive keyring checksum is invalid."
+
+        apt-get install -y --no-install-recommends "$KEYRING_DEB"
+    fi
+
+    [[ -s "$RADXA_KEYRING" ]] ||
+        die "Radxa archive keyring was not installed."
+
+    expected_line="deb [signed-by=$RADXA_KEYRING] $RADXA_REPO_URL $RADXA_REPO_SUITE main"
+    install -d -m 0755 -- "$(dirname -- "$RADXA_REPO_FILE")"
+    printf '%s\n' "$expected_line" >"$RADXA_REPO_FILE"
+
+    apt-get update
+
+    package_has_candidate radxa-archive-keyring ||
+        die "Radxa archive keyring has no candidate in the configured repository."
+    package_has_candidate librtui ||
+        die "librtui has no candidate in the configured Radxa repository."
+    package_has_candidate rsetup ||
+        die "rsetup has no candidate in the configured Radxa repository."
+
+    apt-get install -y --no-install-recommends radxa-archive-keyring
+
+    printf 'Official Radxa Trixie repository: PASS\n'
+}
+
+main "$@"

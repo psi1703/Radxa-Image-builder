@@ -1,0 +1,13 @@
+[Unit]
+Description=Finalize a pending Radxa Cubie A5E kernel update
+After=local-fs.target
+Before=multi-user.target
+ConditionPathExists=/var/lib/cubie-a5e-update/pending.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cubie-a5e-update --finalize-boot
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=multi-user.target

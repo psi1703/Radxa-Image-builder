@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+readonly PROJECT_ROOT
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+mapfile -d '' shell_files < <(
+    find "$PROJECT_ROOT" \
+        -path "$PROJECT_ROOT/build" -prune -o \
+        -type f -name '*.sh' -print0 |
+        sort -z
+)
+
+((${#shell_files[@]} > 0)) || fail "No shell programs found."
+
+for shell_file in "${shell_files[@]}"; do
+    bash -n "$shell_file"
+    [[ -x "$shell_file" ]] || fail "Shell program is not executable: ${shell_file#$PROJECT_ROOT/}"
+done
+
+if command -v shellcheck >/dev/null 2>&1; then
+    shellcheck --severity=warning "${shell_files[@]}"
+else
+    printf 'WARN: shellcheck is not installed; static analysis skipped.\n' >&2
+fi
+
+forbidden_home_path="/home/"psi
+if grep -RIl --include='*.sh' --include='*.env' "$forbidden_home_path" "$PROJECT_ROOT" |
+    grep -q .; then
+    fail "A host-specific legacy home path remains in an active source file."
+fi
+
+if find "$PROJECT_ROOT" \
+    -path "$PROJECT_ROOT/build" -prune -o \
+    -type f -size +10M -print -quit |
+    grep -q .; then
+    fail "A file larger than 10 MiB is present outside build/."
+fi
+
+if find "$PROJECT_ROOT" \
+    -path "$PROJECT_ROOT/build" -prune -o \
+    -type f \( -iname '*private*.pem' -o -iname '*.key' \) -print -quit |
+    grep -q .; then
+    fail "A possible private key is present in repository content."
+fi
+
+grep -Fxq \
+    'LINUX_EXPECTED_COMMIT="${LINUX_EXPECTED_COMMIT:-038d61fd642278bab63ee8ef722c50d10ab01e8f}"' \
+    "$PROJECT_ROOT/config/source-pins.env" || fail "Linux pin is missing."
+grep -Fxq \
+    'AIC_EXPECTED_COMMIT="${AIC_EXPECTED_COMMIT:-6e076049b719ac2ff7ce5c92786a680407b11cdb}"' \
+    "$PROJECT_ROOT/config/source-pins.env" || fail "AIC8800 pin is missing."
+
+if [[ -s "$PROJECT_ROOT/MANIFEST.sha256" ]]; then
+    (
+        cd "$PROJECT_ROOT"
+        sha256sum --check MANIFEST.sha256
+    )
+fi
+
+printf 'PASS: repository source validation completed.\n'

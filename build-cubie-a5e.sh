@@ -1,0 +1,608 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 022
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+readonly SCRIPT_NAME="${BASH_SOURCE[0]##*/}"
+
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
+# shellcheck source=config/source-pins.env
+source "$SCRIPT_DIR/config/source-pins.env"
+
+STAGE_NAME="WRAPPER"
+
+BUILD_ROOT="${BUILD_ROOT:-$SCRIPT_DIR/build}"
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-$BUILD_ROOT/downloads}"
+INPUT_DIR="${INPUT_DIR:-$DOWNLOAD_DIR}"
+KERNEL_DIR="${KERNEL_DIR:-$BUILD_ROOT/linux-6.16-one-shot}"
+AIC_REPO="${AIC_REPO:-$BUILD_ROOT/aic8800-radxa}"
+ROOTFS_DIR="${ROOTFS_DIR:-$BUILD_ROOT/rootfs}"
+BASE_IMAGE_BUILDER="${BASE_IMAGE_BUILDER:-$SCRIPT_DIR/base/build-debian13-donor-image.sh}"
+STOCK_IMG_XZ="${STOCK_IMG_XZ:-$INPUT_DIR/radxa-cubie-a5e_bullseye_cli_r7.output_512.img.xz}"
+TARGET_DEVICE="${TARGET_DEVICE:-/dev/sdb}"
+CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
+JOBS="${JOBS:-$(nproc)}"
+CONFIRM_WRITE="${CONFIRM_WRITE:-0}"
+BUILD_MODE="${BUILD_MODE:-image}"
+
+BUILD_ID="${BUILD_ID:-$(date -u '+%Y%m%dT%H%M%SZ')}"
+KERNEL_LOCALVERSION="${KERNEL_LOCALVERSION:-+cubie-a5e.${BUILD_ID}}"
+LOG_ROOT="${LOG_ROOT:-$BUILD_ROOT/logs}"
+LOG_DIR="${LOG_DIR:-$LOG_ROOT/$BUILD_ID}"
+BUILD_LOG="$LOG_DIR/build.log"
+COMMAND_LOG="$LOG_DIR/commands.log"
+ENVIRONMENT_LOG="$LOG_DIR/environment.txt"
+STAGE_LOG="$LOG_DIR/stages.tsv"
+FAILURE_LOG="$LOG_DIR/failure-context.txt"
+TARGET_LOG="$LOG_DIR/target-before-write.txt"
+SUMMARY_LOG="$LOG_DIR/build-summary.txt"
+LOCK_FILE="${LOCK_FILE:-$BUILD_ROOT/.cubie-a5e-one-shot.lock}"
+
+CURRENT_STAGE="startup"
+CURRENT_STAGE_START=0
+CURRENT_STAGE_STARTED_UTC=""
+BUILD_START_EPOCH="$(date +%s)"
+BUILD_SUCCEEDED=0
+LOCK_FD=""
+
+readonly BUILD_ROOT
+readonly DOWNLOAD_DIR
+readonly INPUT_DIR
+readonly KERNEL_DIR
+readonly AIC_REPO
+readonly ROOTFS_DIR
+readonly BASE_IMAGE_BUILDER
+readonly STOCK_IMG_XZ
+readonly TARGET_DEVICE
+readonly CROSS_COMPILE
+readonly JOBS
+readonly CONFIRM_WRITE
+readonly BUILD_MODE
+readonly BUILD_ID
+readonly KERNEL_LOCALVERSION
+readonly LOG_ROOT
+readonly LOG_DIR
+readonly BUILD_LOG
+readonly COMMAND_LOG
+readonly ENVIRONMENT_LOG
+readonly STAGE_LOG
+readonly FAILURE_LOG
+readonly TARGET_LOG
+readonly SUMMARY_LOG
+readonly LOCK_FILE
+
+export BUILD_ROOT DOWNLOAD_DIR INPUT_DIR KERNEL_DIR AIC_REPO ROOTFS_DIR
+export BASE_IMAGE_BUILDER STOCK_IMG_XZ
+export LINUX_REPOSITORY LINUX_REF LINUX_EXPECTED_COMMIT
+export AIC_REPOSITORY AIC_REF AIC_EXPECTED_COMMIT
+export STOCK_IMAGE_URL STOCK_IMAGE_SHA512
+export TARGET_DEVICE
+export CROSS_COMPILE JOBS CONFIRM_WRITE BUILD_ID LOG_ROOT LOG_DIR
+export BUILD_LOG COMMAND_LOG ENVIRONMENT_LOG STAGE_LOG FAILURE_LOG
+export TARGET_LOG SUMMARY_LOG CURRENT_STAGE STAGE_NAME BUILD_MODE
+export KERNEL_LOCALVERSION
+
+stages=("10-prepare-host.sh")
+
+if [[ "$BUILD_MODE" == "image" ]]; then
+    stages+=("15-prepare-debian-rootfs.sh")
+fi
+
+stages+=(
+    "20-backport-gmac1.sh"
+    "25-apply-hardware-dts.sh"
+    "30-build-kernel.sh"
+    "40-build-aic8800.sh"
+    "45-build-update-bundle.sh"
+)
+
+if [[ "$BUILD_MODE" == "image" ]]; then
+    stages+=(
+        "50-write-base-image.sh"
+        "60-install-linux-6.16.sh"
+        "70-install-network-policy.sh"
+        "80-validate-image.sh"
+    )
+fi
+
+timestamp() {
+    date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+duration_text() {
+    local total_seconds="$1"
+    local hours
+    local minutes
+    local seconds
+
+    hours=$((total_seconds / 3600))
+    minutes=$(((total_seconds % 3600) / 60))
+    seconds=$((total_seconds % 60))
+
+    printf '%02d:%02d:%02d' "$hours" "$minutes" "$seconds"
+}
+
+safe_realpath() {
+    local path="$1"
+
+    if command -v realpath >/dev/null 2>&1; then
+        realpath -m -- "$path"
+    else
+        readlink -m -- "$path"
+    fi
+}
+
+initialize_logging() {
+    mkdir -p -- "$LOG_DIR"
+
+    : >"$BUILD_LOG"
+    : >"$COMMAND_LOG"
+    : >"$STAGE_LOG"
+
+    printf 'stage\tstatus\tstarted_utc\tfinished_utc\tduration_seconds\n' >"$STAGE_LOG"
+
+    exec 9>>"$COMMAND_LOG"
+    export BASH_XTRACEFD=9
+
+    PS4='+ ${EPOCHREALTIME} ${BASH_SOURCE##*/}:${LINENO}: '
+    export PS4
+
+    exec > >(tee -a "$BUILD_LOG") 2>&1
+}
+
+capture_environment() {
+    {
+        printf 'Build ID: %s\n' "$BUILD_ID"
+        printf 'Started UTC: %s\n' "$(timestamp)"
+        printf 'Script: %s\n' "$SCRIPT_DIR/$SCRIPT_NAME"
+        printf 'Build root: %s\n' "$BUILD_ROOT"
+        printf 'Download directory: %s\n' "$DOWNLOAD_DIR"
+        printf 'Input directory: %s\n' "$INPUT_DIR"
+        printf 'Kernel directory: %s\n' "$KERNEL_DIR"
+        printf 'AIC repository: %s\n' "$AIC_REPO"
+        printf 'Debian rootfs: %s\n' "$ROOTFS_DIR"
+        printf 'Base image builder: %s\n' "$BASE_IMAGE_BUILDER"
+        printf 'Stock Radxa image: %s\n' "$STOCK_IMG_XZ"
+        printf 'Target device: %s\n' "$TARGET_DEVICE"
+        printf 'Cross compiler: %s\n' "$CROSS_COMPILE"
+        printf 'Jobs: %s\n' "$JOBS"
+        printf 'Confirmation mode: %s\n' "$CONFIRM_WRITE"
+        printf 'Build mode: %s\n' "$BUILD_MODE"
+        printf 'Kernel local version: %s\n' "$KERNEL_LOCALVERSION"
+        printf 'Hostname: %s\n' "$(hostname)"
+        printf 'Kernel: %s\n' "$(uname -a)"
+        printf 'User: %s\n' "$(id)"
+        printf 'Working directory: %s\n' "$PWD"
+        printf 'PATH: %s\n' "$PATH"
+    } >"$ENVIRONMENT_LOG"
+}
+
+acquire_build_lock() {
+    mkdir -p -- "$BUILD_ROOT"
+    exec {LOCK_FD}>"$LOCK_FILE"
+
+    if ! flock -n "$LOCK_FD"; then
+        die "Another one-shot Cubie A5E build owns lock: $LOCK_FILE"
+    fi
+
+    printf '%s\n' "$$" 1>&"$LOCK_FD"
+}
+
+release_build_lock() {
+    if [[ -n "$LOCK_FD" ]]; then
+        flock -u "$LOCK_FD" 2>/dev/null || true
+    fi
+}
+
+finish_current_stage() {
+    local status="$1"
+    local now_epoch
+    local elapsed
+
+    if ((CURRENT_STAGE_START == 0)); then
+        return 0
+    fi
+
+    now_epoch="$(date +%s)"
+    elapsed=$((now_epoch - CURRENT_STAGE_START))
+
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$CURRENT_STAGE" \
+        "$status" \
+        "${CURRENT_STAGE_STARTED_UTC:-unknown}" \
+        "$(timestamp)" \
+        "$elapsed" >>"$STAGE_LOG"
+
+    CURRENT_STAGE_START=0
+}
+
+write_failure_context() {
+    local exit_code="$1"
+    local line_no="$2"
+    local command="$3"
+
+    {
+        printf 'Build ID: %s\n' "$BUILD_ID"
+        printf 'Failed UTC: %s\n' "$(timestamp)"
+        printf 'Stage: %s\n' "$CURRENT_STAGE"
+        printf 'Exit code: %s\n' "$exit_code"
+        printf 'Line: %s\n' "$line_no"
+        printf 'Command: %s\n' "$command"
+        printf 'Target device: %s\n' "$TARGET_DEVICE"
+        printf 'Kernel directory: %s\n' "$KERNEL_DIR"
+        printf 'AIC repository: %s\n' "$AIC_REPO"
+        printf '\nLast 100 build-log lines:\n'
+        tail -n 100 "$BUILD_LOG" 2>/dev/null || true
+    } >"$FAILURE_LOG"
+}
+
+on_error() {
+    local exit_code="$?"
+    local line_no="${1:-unknown}"
+    local command="${2:-unknown}"
+
+    trap - ERR
+    finish_current_stage "FAILED"
+    write_failure_context "$exit_code" "$line_no" "$command"
+
+    printf '\n[x] Build failed.\n' >&2
+    printf '[x] Stage: %s\n' "$CURRENT_STAGE" >&2
+    printf '[x] Exit code: %s\n' "$exit_code" >&2
+    printf '[x] Command: %s\n' "$command" >&2
+    printf '[x] Build log: %s\n' "$BUILD_LOG" >&2
+    printf '[x] Command log: %s\n' "$COMMAND_LOG" >&2
+    printf '[x] Failure context: %s\n' "$FAILURE_LOG" >&2
+
+    exit "$exit_code"
+}
+
+on_signal() {
+    local signal_name="$1"
+
+    trap - ERR
+    finish_current_stage "INTERRUPTED"
+
+    {
+        printf 'Build ID: %s\n' "$BUILD_ID"
+        printf 'Interrupted UTC: %s\n' "$(timestamp)"
+        printf 'Signal: %s\n' "$signal_name"
+        printf 'Stage: %s\n' "$CURRENT_STAGE"
+    } >"$FAILURE_LOG"
+
+    printf '\n[x] Build interrupted by %s during %s.\n' "$signal_name" "$CURRENT_STAGE" >&2
+    exit 130
+}
+
+on_exit() {
+    local exit_code="$?"
+    local elapsed
+
+    release_build_lock
+    elapsed=$(($(date +%s) - BUILD_START_EPOCH))
+
+    if ((BUILD_SUCCEEDED == 1)); then
+        return 0
+    fi
+
+    if ((exit_code != 0)); then
+        printf '[x] Total elapsed time: %s\n' "$(duration_text "$elapsed")" >&2
+    fi
+}
+
+start_stage() {
+    local stage="$1"
+
+    CURRENT_STAGE="$stage"
+    CURRENT_STAGE_START="$(date +%s)"
+    CURRENT_STAGE_STARTED_UTC="$(timestamp)"
+
+    export CURRENT_STAGE
+    export STAGE_NAME="$stage"
+
+    log "============================================================"
+    log "Starting stage: $stage"
+    log "Stage log directory: $LOG_DIR"
+    log "============================================================"
+}
+
+run_stage() {
+    local stage="$1"
+    local stage_path="$SCRIPT_DIR/$stage"
+    local stage_start
+    local stage_end
+    local elapsed
+
+    need_file "$stage_path"
+
+    [[ -x "$stage_path" ]] || die "Stage is not executable: $stage_path"
+
+    start_stage "$stage"
+    stage_start="$(date +%s)"
+
+    set -x
+    "$stage_path"
+    set +x
+
+    stage_end="$(date +%s)"
+    elapsed=$((stage_end - stage_start))
+
+    finish_current_stage "SUCCESS"
+    log "Completed stage: $stage"
+    log "Stage duration: $(duration_text "$elapsed")"
+}
+
+validate_integer() {
+    local name="$1"
+    local value="$2"
+
+    [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
+        die "$name must be a positive integer, got: $value"
+}
+
+validate_paths() {
+    local normalized_build_root
+    local normalized_input_dir
+    local normalized_kernel_dir
+    local normalized_aic_repo
+    local normalized_rootfs_dir
+    local normalized_base_image_builder
+    local normalized_stock_img
+    local normalized_script_dir
+
+    normalized_build_root="$(safe_realpath "$BUILD_ROOT")"
+    normalized_input_dir="$(safe_realpath "$INPUT_DIR")"
+    normalized_kernel_dir="$(safe_realpath "$KERNEL_DIR")"
+    normalized_aic_repo="$(safe_realpath "$AIC_REPO")"
+    normalized_rootfs_dir="$(safe_realpath "$ROOTFS_DIR")"
+    normalized_base_image_builder="$(safe_realpath "$BASE_IMAGE_BUILDER")"
+    normalized_stock_img="$(safe_realpath "$STOCK_IMG_XZ")"
+    normalized_script_dir="$(safe_realpath "$SCRIPT_DIR")"
+
+    [[ "$normalized_build_root" == "$normalized_script_dir/build" ]] ||
+        die "BUILD_ROOT must be the repository build directory: $normalized_build_root"
+
+    [[ "$normalized_input_dir" == "$normalized_build_root/downloads" ]] ||
+        die "INPUT_DIR must be BUILD_ROOT/downloads: $normalized_input_dir"
+
+    [[ "$normalized_kernel_dir" == "$normalized_build_root/linux-6.16-one-shot" ]] ||
+        die "Unexpected KERNEL_DIR: $normalized_kernel_dir"
+
+    [[ "$normalized_aic_repo" == "$normalized_build_root/aic8800-radxa" ]] ||
+        die "Unexpected AIC_REPO: $normalized_aic_repo"
+
+    [[ "$normalized_rootfs_dir" == "$normalized_build_root/rootfs" ]] ||
+        die "Unexpected ROOTFS_DIR: $normalized_rootfs_dir"
+
+    [[ "$normalized_base_image_builder" == "$normalized_script_dir/base/build-debian13-donor-image.sh" ]] ||
+        die "Unexpected BASE_IMAGE_BUILDER: $normalized_base_image_builder"
+
+    [[ "$normalized_stock_img" == "$normalized_input_dir/radxa-cubie-a5e_bullseye_cli_r7.output_512.img.xz" ]] ||
+        die "STOCK_IMG_XZ must be inside INPUT_DIR: $normalized_stock_img"
+}
+
+require_host_commands() {
+    local commands=(
+        awk bash blockdev date df findmnt flock grep head lsblk make
+        mountpoint nproc readlink sed sync tee udevadm umount
+    )
+    local command_name
+
+    for command_name in "${commands[@]}"; do
+        command -v "$command_name" >/dev/null 2>&1 ||
+            die "Required host command is missing: $command_name"
+    done
+
+}
+
+validate_target_device() {
+    local target_type
+    local target_real
+    local target_size
+    local removable
+    local transport
+    local mounted_children
+
+    [[ "$TARGET_DEVICE" == /dev/* ]] ||
+        die "TARGET_DEVICE must be a /dev path: $TARGET_DEVICE"
+
+    [[ -b "$TARGET_DEVICE" ]] ||
+        die "Target block device not found: $TARGET_DEVICE"
+
+    target_type="$(lsblk -dnro TYPE "$TARGET_DEVICE" 2>/dev/null || true)"
+    [[ "$target_type" == "disk" ]] ||
+        die "TARGET_DEVICE must be an entire disk, not a partition: $TARGET_DEVICE"
+
+    case "$TARGET_DEVICE" in
+        /dev/sda | /dev/vda | /dev/xvda | /dev/nvme0n1 | /dev/mmcblk0)
+            die "Refusing dangerous host-disk target: $TARGET_DEVICE"
+            ;;
+    esac
+
+    target_real="$(readlink -f -- "$TARGET_DEVICE")"
+    target_size="$(blockdev --getsize64 "$TARGET_DEVICE")"
+
+    ((target_size >= 4 * 1024 * 1024 * 1024)) ||
+        die "Target device is unexpectedly small: $TARGET_DEVICE"
+
+    removable="$(lsblk -dnro RM "$TARGET_DEVICE" 2>/dev/null || true)"
+    transport="$(lsblk -dnro TRAN "$TARGET_DEVICE" 2>/dev/null || true)"
+
+    if [[ "$removable" != "1" && "$transport" != "usb" && "$transport" != "mmc" ]]; then
+        die "Target does not appear removable: device=$TARGET_DEVICE transport=${transport:-unknown} removable=${removable:-unknown}"
+    fi
+
+    mounted_children="$(
+        lsblk -nrpo NAME,MOUNTPOINTS "$TARGET_DEVICE" |
+            awk 'NF > 1 && $2 != "" {print}'
+    )"
+
+    if [[ -n "$mounted_children" ]]; then
+        printf '%s\n' "$mounted_children" >&2
+        die "Target or one of its partitions is mounted."
+    fi
+
+    lsblk -o NAME,PATH,SIZE,TYPE,FSTYPE,LABEL,MODEL,SERIAL,TRAN,RM,MOUNTPOINTS \
+        "$TARGET_DEVICE" >"$TARGET_LOG"
+
+    [[ -e "/sys/class/block/$(basename "$target_real")" ]] ||
+        die "Target sysfs entry is missing: $TARGET_DEVICE"
+}
+
+validate_source_inputs() {
+    local stage
+
+    if [[ "$BUILD_MODE" == "image" ]]; then
+        [[ -f "$BASE_IMAGE_BUILDER" ]] ||
+            die "Base image builder not found: $BASE_IMAGE_BUILDER"
+
+        [[ -x "$BASE_IMAGE_BUILDER" ]] ||
+            die "Base image builder is not executable: $BASE_IMAGE_BUILDER"
+
+        need_file "$SCRIPT_DIR/config/source-pins.env"
+    fi
+
+    [[ -f "$SCRIPT_DIR/lib/common.sh" ]] ||
+        die "Missing common library: $SCRIPT_DIR/lib/common.sh"
+
+    for stage in "${stages[@]}"; do
+        need_file "$SCRIPT_DIR/$stage"
+        [[ -x "$SCRIPT_DIR/$stage" ]] ||
+            die "Stage is not executable: $SCRIPT_DIR/$stage"
+    done
+}
+
+confirm_target_destruction() {
+    local answer=""
+
+    lsblk -o NAME,SIZE,MODEL,SERIAL,TRAN,FSTYPE,LABEL,MOUNTPOINTS \
+        "$TARGET_DEVICE" || true
+
+    printf '\nWARNING: this build will erase the entire target device.\n' >&2
+    printf 'Device path: %s\n\n' "$TARGET_DEVICE" >&2
+
+    if [[ "$CONFIRM_WRITE" == "1" ]]; then
+        log "Non-interactive destructive-write confirmation accepted."
+        return 0
+    fi
+
+    read -r -p "Type I-UNDERSTAND to continue: " answer
+    [[ "$answer" == "I-UNDERSTAND" ]] || die "Confirmation not given."
+}
+
+write_summary() {
+    local finish_epoch
+    local elapsed
+
+    finish_epoch="$(date +%s)"
+    elapsed=$((finish_epoch - BUILD_START_EPOCH))
+
+    {
+        printf 'Build ID: %s\n' "$BUILD_ID"
+        printf 'Completed UTC: %s\n' "$(timestamp)"
+        printf 'Status: SUCCESS\n'
+        printf 'Build mode: %s\n' "$BUILD_MODE"
+        printf 'Duration: %s\n' "$(duration_text "$elapsed")"
+        printf 'Kernel source: %s\n' "$KERNEL_DIR"
+        printf 'AIC repository: %s\n' "$AIC_REPO"
+        printf 'Signed update bundle: %s\n' \
+            "$(<"$BUILD_ROOT/.one-shot-update-bundle")"
+        printf 'Single-kernel steady state: yes\n'
+        printf 'Persistent Linux 5.15 recovery entry retained: no\n'
+
+        if [[ "$BUILD_MODE" == "image" ]]; then
+            printf 'Target device: %s\n' "$TARGET_DEVICE"
+        fi
+
+        printf 'Expected GMAC0 interface: eth0\n'
+        printf 'Expected GMAC1 interface: eth1\n'
+        printf 'Expected AIC8800 interface: wlan0\n'
+        printf 'Build log: %s\n' "$BUILD_LOG"
+        printf 'Command log: %s\n' "$COMMAND_LOG"
+        printf 'Stage timing: %s\n' "$STAGE_LOG"
+    } >"$SUMMARY_LOG"
+}
+
+main() {
+    local total_elapsed
+    local stage
+
+    initialize_logging
+
+    trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
+    trap 'on_signal INT' INT
+    trap 'on_signal TERM' TERM
+    trap on_exit EXIT
+
+    log "Cubie A5E one-shot build starting"
+    log "Build ID: $BUILD_ID"
+    log "Build log: $BUILD_LOG"
+
+    [[ "$(id -u)" -eq 0 ]] || die "Run this wrapper with sudo/root."
+
+    validate_integer "JOBS" "$JOBS"
+
+    case "$CONFIRM_WRITE" in
+        0 | 1) ;;
+        *) die "CONFIRM_WRITE must be 0 or 1, got: $CONFIRM_WRITE" ;;
+    esac
+
+    case "$BUILD_MODE" in
+        image | update-bundle) ;;
+        *) die "BUILD_MODE must be image or update-bundle, got: $BUILD_MODE" ;;
+    esac
+
+    [[ "$KERNEL_LOCALVERSION" =~ ^\+[A-Za-z0-9._+-]+$ ]] ||
+        die "KERNEL_LOCALVERSION must start with + and contain only kernel-safe characters."
+
+    validate_paths
+    require_host_commands
+    acquire_build_lock
+    capture_environment
+    validate_source_inputs
+
+    if [[ "$BUILD_MODE" == "image" ]]; then
+        validate_target_device
+        confirm_target_destruction
+        sync
+        udevadm settle
+    fi
+
+    for stage in "${stages[@]}"; do
+        run_stage "$stage"
+    done
+
+    sync
+
+    if [[ "$BUILD_MODE" == "image" ]]; then
+        udevadm settle
+    fi
+
+    write_summary
+    BUILD_SUCCEEDED=1
+
+    total_elapsed=$(($(date +%s) - BUILD_START_EPOCH))
+
+    log "============================================================"
+    log "ONE-SHOT BUILD COMPLETED"
+    log "Build ID: $BUILD_ID"
+    log "Total duration: $(duration_text "$total_elapsed")"
+    log "Build mode: $BUILD_MODE"
+    log "Kernel source: $KERNEL_DIR"
+    log "Signed update bundle: $(<"$BUILD_ROOT/.one-shot-update-bundle")"
+    log "Expected interfaces: GMAC0=eth0, GMAC1=eth1, AIC8800=wlan0"
+
+    if [[ "$BUILD_MODE" == "image" ]]; then
+        log "Target device: $TARGET_DEVICE"
+        log "Image contains one managed kernel and no Linux 5.15 recovery entry."
+    fi
+
+    log "Build summary: $SUMMARY_LOG"
+    log "Build log: $BUILD_LOG"
+    log "Command log: $COMMAND_LOG"
+    log "============================================================"
+}
+
+main "$@"
