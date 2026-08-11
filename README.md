@@ -28,7 +28,7 @@ wlan0
 
 Managed, disconnected, no saved Wi-Fi profile
 
-The image creates initbox with password init, passwordless sudo, no forced password change, and no password expiry. Automatic root login is disabled. Stage 80 rejects an image that does not match this policy.
+The image creates initbox with password, passwordless sudo, no forced password change, and no password expiry. Automatic root login is disabled. Stage 80 rejects an image that does not match this policy.
 
 Repository layout
 
