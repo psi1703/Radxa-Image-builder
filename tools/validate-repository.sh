@@ -19,21 +19,42 @@ mapfile -d '' shell_files < <(
         sort -z
 )
 
+runtime_programs=(
+    "$PROJECT_ROOT/assets/rsetup"
+    "$PROJECT_ROOT/assets/cubie-a5e-update"
+    "$PROJECT_ROOT/assets/ensure-radxa-trixie-repo"
+)
+readonly runtime_programs
+
+program_files=("${shell_files[@]}" "${runtime_programs[@]}")
+readonly program_files
+
 ((${#shell_files[@]} > 0)) || fail "No shell programs found."
 
-for shell_file in "${shell_files[@]}"; do
-    bash -n "$shell_file"
-    [[ -x "$shell_file" ]] || fail "Shell program is not executable: ${shell_file#$PROJECT_ROOT/}"
+for program_file in "${program_files[@]}"; do
+    [[ -f "$program_file" ]] || fail "Required shell program is missing: ${program_file#$PROJECT_ROOT/}"
+    bash -n "$program_file"
+    [[ -x "$program_file" ]] || fail "Shell program is not executable: ${program_file#$PROJECT_ROOT/}"
 done
 
 if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck --severity=warning "${shell_files[@]}"
+    shellcheck --severity=warning "${program_files[@]}"
 else
     printf 'WARN: shellcheck is not installed; static analysis skipped.\n' >&2
 fi
 
+mapfile -d '' env_files < <(
+    find "$PROJECT_ROOT" \
+        -path "$PROJECT_ROOT/build" -prune -o \
+        -type f -name '*.env' -print0 |
+        sort -z
+)
+
+source_scan_files=("${program_files[@]}" "${env_files[@]}")
+readonly source_scan_files
+
 forbidden_home_path="/home/"psi
-if grep -RIl --include='*.sh' --include='*.env' "$forbidden_home_path" "$PROJECT_ROOT" |
+if grep -Il -- "$forbidden_home_path" "${source_scan_files[@]}" |
     grep -q .; then
     fail "A host-specific legacy home path remains in an active source file."
 fi
