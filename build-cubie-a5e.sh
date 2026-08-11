@@ -450,6 +450,85 @@ validate_paths() {
         die "STOCK_IMG_XZ must be inside INPUT_DIR: $normalized_stock_img"
 }
 
+install_required_host_packages() {
+    local packages=(
+        bc
+        binfmt-support
+        binutils-aarch64-linux-gnu
+        bison
+        build-essential
+        ca-certificates
+        cloud-guest-utils
+        cpio
+        curl
+        debootstrap
+        device-tree-compiler
+        diffutils
+        dwarves
+        e2fsprogs
+        file
+        flex
+        gcc-aarch64-linux-gnu
+        git
+        kmod
+        libelf-dev
+        libssl-dev
+        make
+        openssl
+        parted
+        patch
+        python3
+        qemu-user-static
+        quilt
+        rsync
+        tar
+        u-boot-tools
+        udev
+        util-linux
+        xz-utils
+    )
+    local missing=()
+    local command_name
+    local package
+
+    for command_name in apt-get dpkg-query grep; do
+        command -v "$command_name" >/dev/null 2>&1 ||
+            die "Required Debian package-manager command is missing: $command_name"
+    done
+
+    log "Checking required Debian host packages before starting build stages."
+
+    for package in "${packages[@]}"; do
+        if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null |
+            grep -qx 'install ok installed'; then
+            missing+=("$package")
+        fi
+    done
+
+    if ((${#missing[@]} == 0)); then
+        log "All required Debian host packages are already installed."
+        return 0
+    fi
+
+    log "Installing ${#missing[@]} missing Debian host package(s):"
+    printf '  - %s\n' "${missing[@]}"
+
+    run apt-get update
+    run env DEBIAN_FRONTEND=noninteractive \
+        apt-get install \
+        -y \
+        --no-install-recommends \
+        "${missing[@]}"
+
+    for package in "${packages[@]}"; do
+        dpkg-query -W -f='${Status}' "$package" 2>/dev/null |
+            grep -qx 'install ok installed' ||
+            die "Required Debian host package is still unavailable after installation: $package"
+    done
+
+    log "Required Debian host package installation passed."
+}
+
 require_host_commands() {
     local commands=(
         awk bash blockdev date df findmnt flock grep head lsblk make
@@ -767,6 +846,7 @@ main() {
         die "KERNEL_LOCALVERSION must start with + and contain only kernel-safe characters."
 
     validate_paths
+    install_required_host_packages
     require_host_commands
     acquire_build_lock
     validate_source_inputs
