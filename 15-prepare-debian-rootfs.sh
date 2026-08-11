@@ -187,6 +187,7 @@ create_rootfs() {
 
     run chroot "$ROOTFS_DIR" \
         /usr/bin/qemu-aarch64-static \
+        /bin/sh \
         /debootstrap/debootstrap \
         --second-stage
 
