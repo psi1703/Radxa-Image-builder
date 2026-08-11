@@ -39,10 +39,21 @@ Repository layout
 ├── assets/                         # small board runtime assets committed to Git
 ├── config/source-pins.env          # upstream refs and donor checksum
 ├── lib/common.sh                   # shared shell helpers
-├── tools/validate-repository.sh    # local/CI source validation
+├── tools/validate-repository.sh    # optional local source validation
 └── build/                          # downloads, sources, rootfs, logs, keys; ignored
 
-Everything produced after cloning stays under build/.
+Everything produced after cloning stays under build/. No file from the old /home/psi/cubie-a5e-build layout is required.
+
+Files added or replaced through the GitHub website may lose their executable bit. After each fresh clone, normalize the repository programs once:
+
+chmod 0755 -- \
+  ./*.sh \
+  base/*.sh \
+  lib/*.sh \
+  tools/*.sh \
+  assets/rsetup \
+  assets/cubie-a5e-update \
+  assets/ensure-radxa-trixie-repo
 
 Host requirements
 
@@ -62,6 +73,15 @@ Build directly to an SD card or SSD
 
 git clone YOUR_GITHUB_REPOSITORY_URL cubie-a5e-image-builder
 cd cubie-a5e-image-builder
+
+chmod 0755 -- \
+  ./*.sh \
+  base/*.sh \
+  lib/*.sh \
+  tools/*.sh \
+  assets/rsetup \
+  assets/cubie-a5e-update \
+  assets/ensure-radxa-trixie-repo
 
 sudo env \
   OUTPUT_MODE=device \
@@ -156,3 +176,5 @@ The checker runs Bash parsing, ShellCheck when installed, manifest verification,
 Tested hardware state
 
 The completed image was boot-tested with kernel 6.16.0+cubie-a5e.20260728T094708Z+: initbox login worked, ping and nano were present, systemd reported zero failed units, eth1 linked, and eth0/wlan0 were available under their expected names. See docs/VALIDATED-HARDWARE.md for the recorded result and docs/validated-build-report.txt for the earlier source-tree validation record.
+
+No license has been selected for this repository. Add the intended license before publishing it for third-party reuse.
