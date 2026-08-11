@@ -1,0 +1,19 @@
+# All downloaded, generated and secret-bearing build state lives here.
+/build/
+
+# Large disk images and extracted payloads must never be committed.
+*.img
+*.img.xz
+*.raw
+radxa-cli-payload.tar
+
+# Update signing identities are local-only.
+*private*.pem
+update-signing/
+
+# Local logs, editor files and archive output.
+*.log
+*.swp
+*.tmp
+.DS_Store
+/dist/
