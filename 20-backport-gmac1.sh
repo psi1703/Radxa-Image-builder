@@ -10,7 +10,7 @@ readonly SCRIPT_DIR
 source "$SCRIPT_DIR/lib/common.sh"
 
 export STAGE_NAME="GMAC1"
-# Stage 20 revision: gmac1-binding-and-rerun-fixed-20260725
+# Stage 20 revision: pinned-nine-commits-patch-equivalent-rerun-20260811
 
 : "${BUILD_ROOT:?BUILD_ROOT is not set}"
 : "${KERNEL_DIR:?KERNEL_DIR is not set}"
@@ -35,6 +35,7 @@ readonly PCK600_MAKEFILE="$PCK600_DIR/Makefile"
 readonly PCK600_BINDING="$KERNEL_DIR/include/dt-bindings/power/allwinner,sun55i-a523-pck-600.h"
 readonly R_CCU_RESET_BINDING="$KERNEL_DIR/include/dt-bindings/reset/sun55i-a523-r-ccu.h"
 readonly R_CCU_DRIVER="$KERNEL_DIR/drivers/clk/sunxi-ng/ccu-sun55i-a523-r.c"
+readonly AXP20X_MFD_DRIVER="$KERNEL_DIR/drivers/mfd/axp20x.c"
 readonly DTB_FILE="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dtb"
 
 if [[ -n "${LOG_DIR:-}" ]]; then
@@ -137,6 +138,7 @@ cherry_pick_pinned_commit() {
     local commit="$1"
     local subject="$2"
     local actual_subject
+    local patch_status
 
     git -C "$KERNEL_DIR" cat-file -e "$commit^{commit}" 2>/dev/null ||
         die "Pinned upstream commit is unavailable: $commit"
@@ -151,6 +153,32 @@ cherry_pick_pinned_commit() {
         APPLIED_SUBJECTS+=("$subject")
         return 0
     fi
+
+    git -C "$KERNEL_DIR" cat-file -e "${commit}^" 2>/dev/null ||
+        die "Parent of pinned upstream commit is unavailable: $commit"
+
+    patch_status="$(
+        git -C "$KERNEL_DIR" \
+            cherry \
+            --abbrev=40 \
+            HEAD \
+            "$commit" \
+            "${commit}^"
+    )"
+
+    case "$patch_status" in
+        "- $commit")
+            log "Patch-equivalent backport already present: $subject"
+            APPLIED_COMMITS+=("$commit")
+            APPLIED_SUBJECTS+=("$subject")
+            return 0
+            ;;
+        "+ $commit")
+            ;;
+        *)
+            die "Could not determine patch-equivalence status for: $subject ($commit)"
+            ;;
+    esac
 
     log "Cherry-picking upstream commit: $subject"
     log "Commit: $commit"
@@ -169,6 +197,7 @@ apply_required_upstream_backports() {
     local commit
     local subject
     local -a required_commits=(
+        "88828c7e940dd45d139ad4a39d702b23840a37c5|mfd: axp20x: Set explicit ID for AXP313 regulator"
         "f99d4fccd2185176baf4ecac9a49d280fc62b953|dt-bindings: power: Add A523 PPU and PCK600 power controllers"
         "61977ccf6568f9d104462727b49412a80c22c519|dt-bindings: reset: sun55i-a523-r-ccu: Add missing PPU0 reset"
         "c17b1b6c86059664e91008a23547ef0aadfc2228|clk: sunxi-ng: sun55i-a523-r-ccu: Add missing PPU0 reset"
@@ -417,6 +446,12 @@ validate_gmac1_sources() {
     require_nonempty_file "$PCK600_BINDING"
     require_nonempty_file "$R_CCU_RESET_BINDING"
     require_nonempty_file "$R_CCU_DRIVER"
+    require_nonempty_file "$AXP20X_MFD_DRIVER"
+
+    grep -qF \
+        'MFD_CELL_BASIC("axp20x-regulator", NULL, NULL, 0, 1),' \
+        "$AXP20X_MFD_DRIVER" ||
+        die "AXP313 regulator cell lacks its conflict-free explicit device ID."
 
     grep -q 'config DWMAC_SUN55I' "$GMAC1_KCONFIG" ||
         die "DWMAC_SUN55I Kconfig entry is missing."
@@ -722,7 +757,8 @@ write_stamp_and_reports() {
                 "${APPLIED_COMMITS[$index]}"
         done
 
-        printf 'dts_method=upstream-eight-commits-plus-v6.16-dts-port\n'
+        printf 'dts_method=upstream-nine-commits-plus-v6.16-dts-port\n'
+        printf 'axp313_regulator_id_backport=required-and-applied\n'
         printf 'sram_syscon_backport=required-and-applied\n'
         printf 'pck600_backport=required-and-applied\n'
         printf 'status=complete\n'
@@ -735,6 +771,7 @@ write_stamp_and_reports() {
         printf '================================\n'
         printf 'Status: PASS\n'
         printf 'Kernel baseline: %s\n' "$EXPECTED_LINUX_REF"
+        printf 'AXP313/AXP323 regulator device-ID conflict fixed: yes\n'
         printf 'GMAC1 controller address: 0x04510000\n'
         printf 'GMAC1 IRQ: 47\n'
         printf 'GMAC1 PHY address: 1\n'
