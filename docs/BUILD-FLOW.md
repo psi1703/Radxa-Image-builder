@@ -9,10 +9,10 @@
 | 30 | Build Linux, DTBs, and in-tree modules | Kernel tree and release marker |
 | 40 | Build and validate the AIC8800 SDIO modules | AIC8800 tree and module manifest |
 | 45 | Create and sign the managed kernel/vendor update bundle | `build/update-bundles/` and local signing identity |
-| 50 | Write the Radxa donor disk layout and replace partition 3 with Debian 13 | Physical target or image-backed loop device |
-| 60 | Install the kernel, DTB, firmware, packages, login policy, updater, and `rsetup` | Physical target or image-backed loop device |
+| 50 | Write the Radxa donor disk layout, replace partition 3 with Debian 13, and expand it to the selected target or image size | Physical target or image-backed loop device |
+| 60 | Install the kernel, DTB, firmware, packages, login policy, updater, `rsetup`, and first-boot root-filesystem expansion service | Physical target or image-backed loop device |
 | 70 | Install the deterministic interface and NetworkManager policy | Physical target or image-backed loop device |
-| 80 | Perform clean, read-only target validation | Validation report and evidence |
+| 80 | Perform clean, read-only target validation, including expansion-service and free-space checks | Validation report and evidence |
 
 ## Provenance policy
 
@@ -26,7 +26,9 @@ Linux, AIC8800, the donor image, and all nine Linux backports are pinned and ver
 
 With `BUILD_MODE=image`, the wrapper runs all stages. `OUTPUT_MODE=device` operates on the verified whole removable disk in `TARGET_DEVICE` and completely erases it.
 
-With `OUTPUT_MODE=etcher-image`, the wrapper creates a sparse raw disk image under `build/images/`, attaches it through a temporary loop device with partition scanning, and passes that device through the same Stages 50 through 80. It detaches the loop device and compresses the validated result to `.img.xz` only after Stage 80 succeeds.
+With `OUTPUT_MODE=etcher-image`, the wrapper creates a sparse raw disk image directly under `/home/psi/`, attaches it through a temporary loop device with partition scanning, and passes that device through the same Stages 50 through 80. The default image size is 4 GiB; `IMAGE_SIZE_GIB` can select a different whole-number size of at least 4 GiB. The wrapper detaches the loop device and compresses the validated result to `/home/psi/cubie-a5e-debian13-linux6.16-<build-id>.img.xz` only after Stage 80 succeeds, writes the adjacent `.sha256` file, and removes the temporary raw image after successful compression. Image output is restricted to `/home/psi/`.
+
+When an Etcher image is flashed to a larger SD card or SSD, the enabled `cubie-a5e-grow-rootfs.service` runs on first boot. It verifies that the ext4 root filesystem is on final partition 3, expands that partition to the remaining capacity with `growpart`, and expands the filesystem with `resize2fs`. The service records completion only after both operations succeed; if the live kernel cannot reread a changed partition table, the next boot retries safely. Stage 80 verifies the required packages, commands, helper, enabled service, absent completion marker, and minimum root-filesystem free-space headroom before image compression.
 
 With `BUILD_MODE=update-bundle`, the wrapper runs Stages 10 and 20 through 45. It builds and signs the kernel/vendor update bundle without running the target-writing Stages 50 through 80.
 
