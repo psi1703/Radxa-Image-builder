@@ -44,6 +44,10 @@ readonly INITBOX_SUDOERS="/etc/sudoers.d/90-initbox"
 readonly INITBOX_ACCOUNT_STATUS="/var/lib/cubie-a5e/initbox-account.status"
 readonly GETTY_TTY1_DROPIN="/etc/systemd/system/getty@tty1.service.d/99-initbox-login.conf"
 readonly SERIAL_GETTY_DROPIN="/etc/systemd/system/serial-getty@ttyS0.service.d/99-initbox-login.conf"
+readonly ROOT_GROW_PROGRAM="/usr/local/sbin/cubie-a5e-grow-rootfs"
+readonly ROOT_GROW_UNIT="/usr/lib/systemd/system/cubie-a5e-grow-rootfs.service"
+readonly ROOT_GROW_WANTS="/etc/systemd/system/multi-user.target.wants/cubie-a5e-grow-rootfs.service"
+readonly ROOT_GROW_MARKER="/var/lib/cubie-a5e/rootfs-expanded"
 
 readonly ROOT_MNT="${ROOT_MNT:-$BUILD_ROOT/mnt/one-shot-root}"
 readonly DEFAULT_BOOT_MNT="${BOOT_MNT:-$BUILD_ROOT/mnt/one-shot-boot}"
@@ -849,16 +853,24 @@ run_arm64_chroot '
         wpasupplicant
     )
 
-    for package in "${rsetup_packages[@]}"; do
+    root_resize_packages=(
+        cloud-guest-utils
+        e2fsprogs
+    )
+
+    for package in \
+        "${rsetup_packages[@]}" \
+        "${root_resize_packages[@]}"; do
         apt-cache show "$package" >/dev/null 2>&1 || {
-            printf "Required rsetup package has no APT candidate: %s\n" "$package" >&2
+            printf "Required target package has no APT candidate: %s\n" "$package" >&2
             printf "%s\n" "Verify that the Debian 13 and official Radxa APT sources are enabled." >&2
             exit 1
         }
     done
 
     apt-get install -y --no-install-recommends \
-        "${rsetup_packages[@]}"
+        "${rsetup_packages[@]}" \
+        "${root_resize_packages[@]}"
 
     apt-get install -y --reinstall --no-install-recommends \
         librtui \
@@ -952,6 +964,237 @@ done
 [[ "$(readlink "$ROOT_MNT/etc/alternatives/regulatory.db.p7s")" == \
    "/lib/firmware/regulatory.db.p7s-upstream" ]] ||
     die "The upstream regulatory database signature is not selected."
+}
+
+install_root_filesystem_expander() {
+local service_link="$ROOT_MNT$ROOT_GROW_WANTS"
+
+log "Installing the one-time root filesystem expansion service."
+
+install -D -m 0755 /dev/null "$ROOT_MNT$ROOT_GROW_PROGRAM"
+cat >"$ROOT_MNT$ROOT_GROW_PROGRAM" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 022
+
+readonly MARKER="/var/lib/cubie-a5e/rootfs-expanded"
+readonly LOG_FILE="/var/log/cubie-a5e-grow-rootfs.log"
+
+marker_tmp=""
+
+cleanup() {
+    if [[ -n "$marker_tmp" ]]; then
+        rm -f -- "$marker_tmp"
+    fi
+}
+
+log() {
+    printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
+}
+
+die() {
+    log "ERROR: $*"
+    exit 1
+}
+
+trap cleanup EXIT
+
+mkdir -p -- /var/lib/cubie-a5e /var/log
+exec >>"$LOG_FILE" 2>&1
+
+if [[ -e "$MARKER" ]]; then
+    log "Root filesystem expansion was already completed."
+    exit 0
+fi
+
+for command_name in \
+    awk \
+    blockdev \
+    findmnt \
+    growpart \
+    lsblk \
+    partprobe \
+    readlink \
+    resize2fs \
+    sfdisk \
+    sgdisk \
+    udevadm; do
+    command -v "$command_name" >/dev/null 2>&1 ||
+        die "Required command is missing: $command_name"
+done
+
+root_source="$(findmnt -nro SOURCE --target /)"
+[[ -n "$root_source" ]] || die "Unable to identify the mounted root source."
+
+root_part="$(readlink -f -- "$root_source")"
+[[ -b "$root_part" ]] || die "Root source is not a block device: $root_source"
+
+root_fstype="$(findmnt -nro FSTYPE --target /)"
+[[ "$root_fstype" == "ext4" ]] ||
+    die "Automatic expansion supports only ext4 root filesystems: $root_fstype"
+
+root_type="$(lsblk -nro TYPE "$root_part")"
+[[ "$root_type" == "part" ]] ||
+    die "Root filesystem is not on a disk partition: $root_part"
+
+parent_name="$(lsblk -nro PKNAME "$root_part")"
+parent_name="${parent_name//[[:space:]]/}"
+[[ -n "$parent_name" ]] || die "Unable to identify the parent disk for $root_part"
+
+disk="/dev/$parent_name"
+[[ -b "$disk" ]] || die "Parent disk is unavailable: $disk"
+
+part_num="$(lsblk -nro PARTN "$root_part")"
+part_num="${part_num//[[:space:]]/}"
+[[ "$part_num" =~ ^[0-9]+$ ]] ||
+    die "Unable to identify the root partition number: $root_part"
+[[ "$part_num" == "3" ]] ||
+    die "Expected the Cubie A5E root filesystem on partition 3; found $part_num"
+
+highest_part="$(
+    lsblk -nr -o TYPE,PARTN "$disk" |
+        awk '$1 == "part" && ($2 + 0) > highest { highest = $2 + 0 } END { print highest + 0 }'
+)"
+[[ "$highest_part" == "$part_num" ]] ||
+    die "Root partition is not the final partition: root=$part_num final=$highest_part"
+
+disk_size="$(blockdev --getsize64 "$disk")"
+part_size_before="$(blockdev --getsize64 "$root_part")"
+
+log "Expanding root partition $root_part on $disk."
+log "Size before expansion: disk=$disk_size partition=$part_size_before"
+
+set +e
+grow_output="$(growpart "$disk" "$part_num" 2>&1)"
+grow_status=$?
+set -e
+
+if [[ -n "$grow_output" ]]; then
+    printf '%s\n' "$grow_output"
+fi
+
+case "$grow_status" in
+    0)
+        log "Partition table expansion completed."
+        ;;
+    1)
+        log "Partition already uses all available space; continuing with filesystem verification."
+        ;;
+    *)
+        die "growpart failed with exit status $grow_status"
+        ;;
+esac
+
+if ! partprobe "$disk"; then
+    log "partprobe could not refresh the live partition table; the next boot will retry."
+fi
+udevadm settle
+
+part_size_after="$(blockdev --getsize64 "$root_part")"
+
+if [[ "$grow_status" == "0" ]] &&
+   ((part_size_after <= part_size_before)); then
+    die "The partition table changed but the kernel still reports the old partition size; reboot to retry."
+fi
+
+log "Expanding ext4 filesystem on $root_part."
+resize2fs "$root_part"
+
+marker_tmp="$(mktemp "${MARKER}.XXXXXX")"
+{
+    printf 'completed_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'disk=%s\n' "$disk"
+    printf 'root_partition=%s\n' "$root_part"
+    printf 'disk_size_bytes=%s\n' "$disk_size"
+    printf 'partition_size_before_bytes=%s\n' "$part_size_before"
+    printf 'partition_size_after_bytes=%s\n' "$part_size_after"
+} >"$marker_tmp"
+chmod 0644 "$marker_tmp"
+mv -f -- "$marker_tmp" "$MARKER"
+marker_tmp=""
+
+sync
+log "Root filesystem expansion completed successfully."
+EOF
+
+install -D -m 0644 /dev/null "$ROOT_MNT$ROOT_GROW_UNIT"
+cat >"$ROOT_MNT$ROOT_GROW_UNIT" <<'EOF'
+[Unit]
+Description=Expand the Cubie A5E root filesystem to fill its storage device
+After=local-fs.target
+Before=multi-user.target
+ConditionPathExists=!/var/lib/cubie-a5e/rootfs-expanded
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cubie-a5e-grow-rootfs
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+rm -f -- "$ROOT_MNT$ROOT_GROW_MARKER"
+install -d -m 0755 -- "$(dirname -- "$service_link")"
+ln -sfn \
+    /usr/lib/systemd/system/cubie-a5e-grow-rootfs.service \
+    "$service_link"
+
+bash -n "$ROOT_MNT$ROOT_GROW_PROGRAM"
+require_nonempty_file "$ROOT_MNT$ROOT_GROW_UNIT"
+
+[[ -L "$service_link" ]] ||
+    die "Root filesystem expansion service is not enabled."
+[[ "$(readlink "$service_link")" == \
+   "/usr/lib/systemd/system/cubie-a5e-grow-rootfs.service" ]] ||
+    die "Root filesystem expansion service link is incorrect."
+
+run_arm64_chroot '
+    for command_name in growpart resize2fs; do
+        command -v "$command_name" >/dev/null 2>&1 || {
+            printf "Required root expansion command is missing: %s\n" "$command_name" >&2
+            exit 1
+        }
+    done
+
+    for package in cloud-guest-utils e2fsprogs; do
+        status="$(dpkg-query -W -f="\${db:Status-Abbrev}" "$package" 2>/dev/null)"
+        [[ "$status" == ii* ]] || {
+            printf "Required root expansion package is not installed: %s status=%s\n" \
+                "$package" \
+                "$status" >&2
+            exit 1
+        }
+    done
+'
+}
+
+clean_target_apt_cache() {
+log "Cleaning disposable target APT indexes and package archives."
+
+run_arm64_chroot '
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get clean
+    rm -rf -- /var/lib/apt/lists/* /var/cache/apt/archives/partial/*
+'
+
+if find "$ROOT_MNT/var/cache/apt/archives" \
+    -maxdepth 1 \
+    -type f \
+    -name '*.deb' \
+    -print -quit 2>/dev/null |
+    grep -q .; then
+    die "Target APT package archives were not cleaned."
+fi
+
+if find "$ROOT_MNT/var/lib/apt/lists" \
+    -mindepth 1 \
+    -print -quit 2>/dev/null |
+    grep -q .; then
+    die "Target APT package indexes were not cleaned."
+fi
 }
 
 install_initbox_account_and_login_policy() {
@@ -1555,6 +1798,10 @@ printf 'rsetup and librtui installed from packages: yes\n'
 printf 'rsetup chroot source-chain smoke test: PASS\n'
 printf 'Raspberry Pi OS Lite compatible base utilities installed: yes\n'
 printf 'Basic package manifest: %s\n' "$BASIC_PACKAGES_TARGET"
+printf 'Automatic root filesystem expansion installed: yes\n'
+printf 'Root filesystem expansion service: cubie-a5e-grow-rootfs.service\n'
+printf 'Root filesystem expansion marker: %s\n' "$ROOT_GROW_MARKER"
+printf 'Disposable target APT caches cleaned: yes\n'
 printf 'ping command installed: yes\n'
 printf 'nano editor installed: yes\n'
 printf 'Default interactive user: %s\n' "$INITBOX_USER"
@@ -1573,7 +1820,7 @@ printf 'Managed Cubie A5E entry default: yes\n'
 }
 
 main() {
-log "Stage 60 revision: initbox-fixed-password-20260728"
+log "Stage 60 revision: rootfs-autogrow-cache-clean-20260817"
 require_command awk
 require_command blkid
 require_command chroot
@@ -1650,6 +1897,7 @@ validate_single_wifi_loader
 validate_installed_modules
 
 ensure_target_runtime_packages
+install_root_filesystem_expander
 install_initbox_account_and_login_policy
 disable_inapplicable_efi_automount
 ensure_initramfs_tools
@@ -1658,6 +1906,7 @@ validate_initramfs_regulatory_database
 copy_boot_payload
 update_extlinux
 install_update_manager
+clean_target_apt_cache
 validate_rsetup_runtime
 
 sync
@@ -1669,6 +1918,8 @@ log "Set extlinux default to the single cubie-a5e entry."
 log "Removed the official Linux 5.15 kernel and recovery entries."
 log "Installed and smoke-tested rsetup with signed Cubie A5E updates."
 log "Installed the Raspberry Pi OS Lite compatible base utility set."
+log "Installed one-time automatic root filesystem expansion."
+log "Cleaned disposable target APT caches to reduce image size."
 log "Configured initbox with fixed password init, no password expiry and passwordless sudo."
 log "Disabled automatic root login on tty1 and ttyS0."
 log "Installation report: $INSTALL_REPORT"
