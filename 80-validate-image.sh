@@ -53,6 +53,11 @@ readonly RADXA_REPO_HELPER_TARGET="/usr/local/sbin/cubie-a5e-ensure-radxa-repo"
 readonly RADXA_REPO_FILE="/etc/apt/sources.list.d/70-trixie.list"
 readonly RADXA_KEYRING="/usr/share/keyrings/radxa-archive-keyring.gpg"
 readonly REGULATORY_INITRAMFS_STATUS="/var/lib/cubie-a5e/regulatory-initramfs.status"
+readonly ROOT_GROW_PROGRAM="/usr/local/sbin/cubie-a5e-grow-rootfs"
+readonly ROOT_GROW_UNIT="/usr/lib/systemd/system/cubie-a5e-grow-rootfs.service"
+readonly ROOT_GROW_WANTS="/etc/systemd/system/multi-user.target.wants/cubie-a5e-grow-rootfs.service"
+readonly ROOT_GROW_MARKER="/var/lib/cubie-a5e/rootfs-expanded"
+readonly MINIMUM_ROOT_AVAILABLE_BYTES=$((512 * 1024 * 1024))
 
 if [[ -n "${LOG_DIR:-}" ]]; then
 mkdir -p -- "$LOG_DIR"
@@ -76,6 +81,10 @@ BOOT_MNT="$DEFAULT_BOOT_MNT"
 KERNEL_RELEASE=""
 UPDATE_VERSION=""
 SAME_FS=0
+ROOT_SIZE_BYTES=0
+ROOT_USED_BYTES=0
+ROOT_AVAILABLE_BYTES=0
+ROOT_USE_PERCENT="0%"
 
 require_command() {
 local command_name="$1"
@@ -773,6 +782,133 @@ done
 grep -Fxq 'RSETUP_SELF_TEST=PASS' \
     "$ROOT_MNT/var/lib/cubie-a5e/rsetup-self-test.status" ||
     die "rsetup chroot smoke-test marker is missing."
+}
+
+validate_root_autogrow_and_compact_image() {
+local helper="$ROOT_MNT$ROOT_GROW_PROGRAM"
+local unit="$ROOT_MNT$ROOT_GROW_UNIT"
+local service_link="$ROOT_MNT$ROOT_GROW_WANTS"
+local command_name
+local package
+local required_line
+local root_use_numeric
+local available_mib
+local minimum_mib
+local -a required_commands=(
+    growpart
+    partprobe
+    resize2fs
+    sfdisk
+    sgdisk
+)
+local -a required_packages=(
+    cloud-guest-utils
+    e2fsprogs
+)
+local -a required_unit_lines=(
+    'After=local-fs.target'
+    'Before=multi-user.target'
+    'ConditionPathExists=!/var/lib/cubie-a5e/rootfs-expanded'
+    'Type=oneshot'
+    'ExecStart=/usr/local/sbin/cubie-a5e-grow-rootfs'
+    'RemainAfterExit=yes'
+    'TimeoutStartSec=0'
+    'WantedBy=multi-user.target'
+)
+
+require_nonempty_file "$helper"
+require_nonempty_file "$unit"
+
+[[ -x "$helper" ]] ||
+    die "Root filesystem expansion helper is not executable."
+
+bash -n "$helper"
+
+[[ -L "$service_link" ]] ||
+    die "Root filesystem expansion service is not enabled."
+[[ "$(readlink "$service_link")" == \
+   "/usr/lib/systemd/system/cubie-a5e-grow-rootfs.service" ]] ||
+    die "Root filesystem expansion service link is incorrect."
+
+[[ ! -e "$ROOT_MNT$ROOT_GROW_MARKER" ]] ||
+    die "Fresh image unexpectedly contains a completed root expansion marker."
+
+for package in "${required_packages[@]}"; do
+    target_package_installed "$package" ||
+        die "Required root expansion package is not installed: $package"
+done
+
+for command_name in "${required_commands[@]}"; do
+    target_command_exists "$command_name" ||
+        die "Required root expansion command is missing: $command_name"
+done
+
+for required_line in "${required_unit_lines[@]}"; do
+    grep -Fxq "$required_line" "$unit" ||
+        die "Root filesystem expansion service is missing: $required_line"
+done
+
+grep -Fq 'findmnt -nro SOURCE --target /' "$helper" ||
+    die "Root expansion helper does not detect the mounted root source."
+grep -Fq '[[ "$part_num" == "3" ]] ||' "$helper" ||
+    die "Root expansion helper does not enforce partition 3."
+grep -Fq 'die "Root partition is not the final partition:' "$helper" ||
+    die "Root expansion helper does not enforce the final-partition safety check."
+grep -Fq 'growpart "$disk" "$part_num"' "$helper" ||
+    die "Root expansion helper does not expand the detected partition."
+grep -Fq 'resize2fs "$root_part"' "$helper" ||
+    die "Root expansion helper does not resize the ext4 filesystem."
+grep -Fq 'mv -f -- "$marker_tmp" "$MARKER"' "$helper" ||
+    die "Root expansion helper does not finalize its success marker atomically."
+
+[[ -d "$ROOT_MNT/var/cache/apt/archives" ]] ||
+    die "Target APT archive directory is missing."
+[[ -d "$ROOT_MNT/var/lib/apt/lists" ]] ||
+    die "Target APT index directory is missing."
+
+if find "$ROOT_MNT/var/cache/apt/archives" \
+    -maxdepth 1 \
+    -type f \
+    -name '*.deb' \
+    -print -quit |
+    grep -q .; then
+    die "Target image still contains cached APT package archives."
+fi
+
+if find "$ROOT_MNT/var/lib/apt/lists" \
+    -mindepth 1 \
+    -print -quit |
+    grep -q .; then
+    die "Target image still contains disposable APT package indexes."
+fi
+
+IFS=' ' read -r \
+    ROOT_SIZE_BYTES \
+    ROOT_USED_BYTES \
+    ROOT_AVAILABLE_BYTES \
+    ROOT_USE_PERCENT < <(
+        df -B1 --output=size,used,avail,pcent "$ROOT_MNT" |
+            awk 'NR == 2 { print $1, $2, $3, $4 }'
+    )
+
+[[ "$ROOT_SIZE_BYTES" =~ ^[0-9]+$ ]] ||
+    die "Unable to determine root filesystem size."
+[[ "$ROOT_USED_BYTES" =~ ^[0-9]+$ ]] ||
+    die "Unable to determine root filesystem used space."
+[[ "$ROOT_AVAILABLE_BYTES" =~ ^[0-9]+$ ]] ||
+    die "Unable to determine root filesystem available space."
+[[ "$ROOT_USE_PERCENT" =~ ^[0-9]+%$ ]] ||
+    die "Unable to determine root filesystem use percentage."
+
+root_use_numeric="${ROOT_USE_PERCENT%\%}"
+((root_use_numeric < 100)) ||
+    die "Root filesystem has no usable free space."
+
+available_mib=$((ROOT_AVAILABLE_BYTES / 1024 / 1024))
+minimum_mib=$((MINIMUM_ROOT_AVAILABLE_BYTES / 1024 / 1024))
+
+((ROOT_AVAILABLE_BYTES >= MINIMUM_ROOT_AVAILABLE_BYTES)) ||
+    die "Root filesystem has only ${available_mib} MiB available; a compact image requires at least ${minimum_mib} MiB."
 }
 
 validate_initbox_account_and_login_policy() {
@@ -1800,6 +1936,16 @@ printf 'rsetup and librtui packages installed: yes\n'
 printf 'rsetup chroot source-chain smoke test: PASS\n'
 printf 'Raspberry Pi OS Lite compatible base utilities installed: yes\n'
 printf 'Basic package manifest: %s\n' "$BASIC_PACKAGES_TARGET"
+printf 'Automatic root filesystem expansion validated: yes\n'
+printf 'Root filesystem expansion service: cubie-a5e-grow-rootfs.service\n'
+printf 'Root filesystem expansion marker absent before first boot: yes\n'
+printf 'Disposable target APT caches absent: yes\n'
+printf 'Root filesystem size bytes: %s\n' "$ROOT_SIZE_BYTES"
+printf 'Root filesystem used bytes: %s\n' "$ROOT_USED_BYTES"
+printf 'Root filesystem available bytes: %s\n' "$ROOT_AVAILABLE_BYTES"
+printf 'Root filesystem use: %s\n' "$ROOT_USE_PERCENT"
+printf 'Minimum compact-image free-space headroom bytes: %s\n' \
+    "$MINIMUM_ROOT_AVAILABLE_BYTES"
 printf 'ping command installed: yes\n'
 printf 'nano editor installed: yes\n'
 printf 'Default interactive user: initbox\n'
@@ -1857,8 +2003,10 @@ printf 'Decompiled DTB: %s\n' "$VALIDATION_DTB"
 
 main() {
 require_command awk
+require_command bash
 require_command blkid
 require_command cmp
+require_command df
 require_command diff
 require_command dpkg-query
 require_command dtc
@@ -1900,7 +2048,7 @@ UPDATE_VERSION="$(tr -d '[:space:]' <"$UPDATE_VERSION_FILE")"
 [[ "$UPDATE_VERSION" =~ ^[A-Za-z0-9._+:-]+$ ]] ||
     die "Update version is invalid: $UPDATE_VERSION"
 
-log "Stage 80 revision: initbox-login-wlan0-and-basics-20260728"
+log "Stage 80 revision: rootfs-autogrow-compact-image-validation-20260817"
 log "Beginning clean read-only target validation."
 
 load_target_layout
@@ -1915,6 +2063,7 @@ validate_firmware
 validate_network_policy
 validate_userland_runtime
 validate_rsetup_and_basic_packages
+validate_root_autogrow_and_compact_image
 validate_initbox_account_and_login_policy
 validate_single_kernel_state
 validate_update_manager
@@ -1926,6 +2075,8 @@ write_validation_report
 log "Validation passed after clean read-only remount."
 log "U-Boot source: $BOOT_PART:$EXTLINUX_REL"
 log "Root filesystem: $ROOT_PART"
+log "Root filesystem capacity: size=$ROOT_SIZE_BYTES used=$ROOT_USED_BYTES available=$ROOT_AVAILABLE_BYTES use=$ROOT_USE_PERCENT"
+log "Automatic first-boot root filesystem expansion validated."
 log "Expected interfaces after Linux $KERNEL_RELEASE boots: eth0, eth1 and wlan0."
 log "Validation report: $VALIDATION_REPORT"
 
