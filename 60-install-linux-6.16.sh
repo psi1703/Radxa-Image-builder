@@ -785,7 +785,6 @@ RESOLVER_PREPARED=1
 ensure_target_runtime_packages() {
 local bashrc="$ROOT_MNT/etc/bash.bashrc"
 local candidate
-local regulatory_dir=""
 local timesyncd_unit=""
 
 log "Installing the Raspberry Pi OS Lite compatible base utilities and rsetup runtime."
@@ -938,18 +937,8 @@ grep -qF '/usr/share/bash-completion/bash_completion' "$bashrc" ||
 [[ -L "$ROOT_MNT/etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service" ]] ||
     die "systemd-timesyncd.service is not enabled."
 
-for candidate in \
-    "$ROOT_MNT/usr/lib/firmware" \
-    "$ROOT_MNT/lib/firmware"; do
-    if [[ -s "$candidate/regulatory.db" &&
-          -s "$candidate/regulatory.db.p7s" ]]; then
-        regulatory_dir="$candidate"
-        break
-    fi
-done
-
-[[ -n "$regulatory_dir" ]] ||
-    die "wireless-regdb did not install regulatory.db with its PKCS#7 signature."
+require_nonempty_file "$ROOT_MNT/usr/lib/firmware/regulatory.db-upstream"
+require_nonempty_file "$ROOT_MNT/usr/lib/firmware/regulatory.db.p7s-upstream"
 
 [[ -L "$ROOT_MNT/etc/alternatives/regulatory.db" ]] ||
     die "The regulatory.db alternative is missing."
