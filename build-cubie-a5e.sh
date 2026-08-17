@@ -36,7 +36,8 @@ IMAGE_SIZE_GIB="${IMAGE_SIZE_GIB:-8}"
 IMAGE_XZ_LEVEL="${IMAGE_XZ_LEVEL:-6}"
 IMAGE_XZ_THREADS="${IMAGE_XZ_THREADS:-0}"
 IMAGE_OVERWRITE="${IMAGE_OVERWRITE:-0}"
-IMAGE_OUTPUT="${IMAGE_OUTPUT:-$BUILD_ROOT/images/cubie-a5e-debian13-linux6.16-${BUILD_ID}.img.xz}"
+IMAGE_OUTPUT_DIR="/home/psi"
+IMAGE_OUTPUT="${IMAGE_OUTPUT:-$IMAGE_OUTPUT_DIR/cubie-a5e-debian13-linux6.16-${BUILD_ID}.img.xz}"
 IMAGE_RAW="${IMAGE_OUTPUT%.xz}"
 LOG_ROOT="${LOG_ROOT:-$BUILD_ROOT/logs}"
 LOG_DIR="${LOG_DIR:-$LOG_ROOT/$BUILD_ID}"
@@ -77,6 +78,7 @@ readonly IMAGE_SIZE_GIB
 readonly IMAGE_XZ_LEVEL
 readonly IMAGE_XZ_THREADS
 readonly IMAGE_OVERWRITE
+readonly IMAGE_OUTPUT_DIR
 readonly IMAGE_OUTPUT
 readonly IMAGE_RAW
 readonly LOG_ROOT
@@ -548,7 +550,7 @@ require_host_commands() {
 }
 
 validate_output_settings() {
-    local build_root_real
+    local image_output_dir_real
     local image_output_real
     local image_raw_real
 
@@ -587,14 +589,14 @@ validate_output_settings() {
     [[ "$IMAGE_RAW" == *.img ]] ||
         die "The raw image working path must end in .img: $IMAGE_RAW"
 
-    build_root_real="$(safe_realpath "$BUILD_ROOT")"
+    image_output_dir_real="$(safe_realpath "$IMAGE_OUTPUT_DIR")"
     image_output_real="$(safe_realpath "$IMAGE_OUTPUT")"
     image_raw_real="$(safe_realpath "$IMAGE_RAW")"
 
-    [[ "$image_output_real" == "$build_root_real/images/"* ]] ||
-        die "IMAGE_OUTPUT must be inside BUILD_ROOT/images: $image_output_real"
-    [[ "$image_raw_real" == "$build_root_real/images/"* ]] ||
-        die "Raw image must be inside BUILD_ROOT/images: $image_raw_real"
+    [[ "$(dirname -- "$image_output_real")" == "$image_output_dir_real" ]] ||
+        die "IMAGE_OUTPUT must be directly inside $IMAGE_OUTPUT_DIR: $image_output_real"
+    [[ "$(dirname -- "$image_raw_real")" == "$image_output_dir_real" ]] ||
+        die "Raw image must be directly inside $IMAGE_OUTPUT_DIR: $image_raw_real"
     [[ ! -L "$IMAGE_OUTPUT" && ! -L "$IMAGE_RAW" ]] ||
         die "Image output paths must not be symbolic links."
 
