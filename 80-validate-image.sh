@@ -556,7 +556,6 @@ local bash_completion="$ROOT_MNT/usr/share/bash-completion/bash_completion"
 local bashrc="$ROOT_MNT/etc/bash.bashrc"
 local candidate
 local efi_unit
-local regulatory_dir=""
 local timesync_unit=""
 local wants_link=""
 
@@ -600,18 +599,25 @@ if [[ -L "$ROOT_MNT/etc/localtime" ]]; then
         die "Timezone is not Asia/Dubai."
 fi
 
-for candidate in \
-    "$ROOT_MNT/usr/lib/firmware" \
-    "$ROOT_MNT/lib/firmware"; do
-    if [[ -s "$candidate/regulatory.db" &&
-          -s "$candidate/regulatory.db.p7s" ]]; then
-        regulatory_dir="$candidate"
-        break
-    fi
-done
+target_package_installed wireless-regdb ||
+    die "The wireless-regdb package is not installed."
 
-[[ -n "$regulatory_dir" ]] ||
-    die "Wireless regulatory database or its PKCS#7 signature is missing."
+require_nonempty_file "$ROOT_MNT/usr/lib/firmware/regulatory.db-upstream"
+require_nonempty_file "$ROOT_MNT/usr/lib/firmware/regulatory.db.p7s-upstream"
+
+[[ -L "$ROOT_MNT/usr/lib/firmware/regulatory.db" ]] ||
+    die "The active regulatory.db firmware link is missing."
+
+[[ "$(readlink "$ROOT_MNT/usr/lib/firmware/regulatory.db")" == \
+   "/etc/alternatives/regulatory.db" ]] ||
+    die "The active regulatory.db firmware link does not use update-alternatives."
+
+[[ -L "$ROOT_MNT/usr/lib/firmware/regulatory.db.p7s" ]] ||
+    die "The active regulatory.db.p7s firmware link is missing."
+
+[[ "$(readlink "$ROOT_MNT/usr/lib/firmware/regulatory.db.p7s")" == \
+   "/etc/alternatives/regulatory.db.p7s" ]] ||
+    die "The active regulatory.db.p7s firmware link does not use update-alternatives."
 
 [[ -L "$ROOT_MNT/etc/alternatives/regulatory.db" ]] ||
     die "The regulatory.db alternative is missing."
