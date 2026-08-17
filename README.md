@@ -31,10 +31,10 @@ The generated image creates the local account `initbox` with password `init`. Th
 ├── docs/                           # build flow and validated hardware record
 ├── lib/common.sh                   # shared shell helpers
 ├── tools/validate-repository.sh    # optional local source validation
-└── build/                          # downloads, sources, outputs, logs and keys
+└── build/                          # downloads, sources, build state, logs and keys
 ```
 
-Everything produced after cloning stays under the ignored `build/` directory. No file from the old `/home/psi/cubie-a5e-build` layout is required.
+Downloaded sources, rootfs files, build objects, logs, update bundles and signing keys stay under the ignored `build/` directory. In Etcher-image mode, the temporary raw image, final compressed image and checksum are created directly under `/home/psi/`; the temporary raw image is removed after successful compression. No file from the old `/home/psi/cubie-a5e-build` layout is required.
 
 ## Prepare a fresh clone
 
@@ -59,7 +59,7 @@ chmod 0755 -- \
 - Debian or Ubuntu x86-64 build host with `sudo` and Internet access.
 - Approximately 40 GB of free space for downloads, source trees, rootfs, build objects and bundles.
 - For direct writing, a removable SD card or SSD of at least 4 GiB.
-- For Etcher-image creation, enough host storage for the raw working image and compressed output.
+- For Etcher-image creation, enough free space under `/home/psi/` for the raw working image and compressed output.
 
 Required host packages and the Arm64 cross toolchain are installed with `apt-get`.
 
@@ -92,7 +92,6 @@ No SD card or SSD needs to be connected:
 ```bash
 sudo env \
   OUTPUT_MODE=etcher-image \
-  IMAGE_SIZE_GIB=8 \
   ./build-cubie-a5e.sh
 ```
 
@@ -101,15 +100,15 @@ The wrapper creates a sparse raw image and attaches it to a temporary loop devic
 Successful output:
 
 ```text
-build/images/cubie-a5e-debian13-linux6.16-<build-id>.img.xz
-build/images/cubie-a5e-debian13-linux6.16-<build-id>.img.xz.sha256
+/home/psi/cubie-a5e-debian13-linux6.16-<build-id>.img.xz
+/home/psi/cubie-a5e-debian13-linux6.16-<build-id>.img.xz.sha256
 ```
 
 The `.img.xz` is a complete disk image containing the Radxa boot chain and all three partitions. Select it directly in Balena Etcher and flash it to an SD card or SSD whose capacity is at least `IMAGE_SIZE_GIB`.
 
-The default image size is 8 GiB. A different whole-number size of at least 4 GiB can be selected. Stage 50 expands the root partition to fill the generated image, but flashing that image to a larger drive does not automatically expand it beyond the selected image size.
+The default image size is 4 GiB. A different whole-number size of at least 4 GiB can be selected with `IMAGE_SIZE_GIB`. Stage 50 expands the root partition to fill the generated image. After the image is flashed to a larger SD card or SSD, the enabled `cubie-a5e-grow-rootfs.service` expands final partition 3 and its ext4 root filesystem on first boot so they use all remaining capacity on the storage medium. Stage 80 validates the required expansion packages, helper and enabled service before the image is compressed.
 
-To replace an existing image output deliberately, set `IMAGE_OVERWRITE=1`. Image output is restricted to `build/images/`.
+To replace an existing image output deliberately, set `IMAGE_OVERWRITE=1`. Image output is restricted to `/home/psi/`.
 
 ## Rebuild the Debian rootfs
 
@@ -156,7 +155,7 @@ Stage 20 names and verifies all nine required upstream Linux backport commit IDs
 | AIC8800 tree | `build/aic8800-radxa/` |
 | Debian rootfs | `build/rootfs/` |
 | Signed update bundles | `build/update-bundles/` |
-| Flashable images and checksums | `build/images/` |
+| Flashable image and checksum | `/home/psi/cubie-a5e-debian13-linux6.16-<build-id>.img.xz{,.sha256}` |
 | Private signing identity | `build/update-signing/` |
 
 ## Validate repository contents
