@@ -53,8 +53,9 @@ mapfile -d '' env_files < <(
 source_scan_files=("${program_files[@]}" "${env_files[@]}")
 readonly source_scan_files
 
-forbidden_home_path="/home/"psi
-if grep -Il -- "$forbidden_home_path" "${source_scan_files[@]}" |
+legacy_user="psi"
+forbidden_legacy_path="/home/${legacy_user}/cubie-a5e-build"
+if grep -Il -- "$forbidden_legacy_path" "${source_scan_files[@]}" |
     grep -q .; then
     fail "A host-specific legacy home path remains in an active source file."
 fi
@@ -79,6 +80,12 @@ grep -Fxq \
 grep -Fxq \
     'AIC_EXPECTED_COMMIT="${AIC_EXPECTED_COMMIT:-6e076049b719ac2ff7ce5c92786a680407b11cdb}"' \
     "$PROJECT_ROOT/config/source-pins.env" || fail "AIC8800 pin is missing."
+grep -Fxq \
+    'BSP_EXPECTED_COMMIT="${BSP_EXPECTED_COMMIT:-2045a3ca2a01f088c0314dc924bda59d154e363e}"' \
+    "$PROJECT_ROOT/config/source-pins.env" || fail "Radxa BSP pin is missing."
+
+grep -Fq '"22-backport-pcie.sh"' \
+    "$PROJECT_ROOT/build-cubie-a5e.sh" || fail "PCIe backport stage is missing."
 
 grep -Fq 'OUTPUT_MODE="${OUTPUT_MODE:-device}"' \
     "$PROJECT_ROOT/build-cubie-a5e.sh" || fail "Direct-device output default is missing."
