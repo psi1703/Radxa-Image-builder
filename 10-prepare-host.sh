@@ -325,6 +325,7 @@ validate_kernel_cache() {
     [[ -s "$KERNEL_DIR/Makefile" ]] || return 1
     [[ -s "$KERNEL_DIR/.config" ]] || return 1
     [[ -s "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" ]] || return 1
+    [[ -s "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" ]] || return 1
 
     tag_commit="$(git -C "$KERNEL_DIR" rev-parse "$LINUX_REF^{commit}" 2>/dev/null || true)"
     [[ "$tag_commit" == "$LINUX_EXPECTED_COMMIT" ]] || return 1
@@ -381,6 +382,7 @@ validate_legacy_kernel_tree() {
     [[ ! -d "$KERNEL_DIR/.git/rebase-apply" ]] || return 1
     [[ -s "$KERNEL_DIR/.config" ]] || return 1
     [[ -s "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" ]] || return 1
+    [[ -s "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" ]] || return 1
     grep -Fxq 'status=complete' \
         "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" || return 1
 
@@ -766,6 +768,9 @@ write_source_report() {
         printf 'Kernel input fingerprint: %s\n' "$KERNEL_INPUT_FINGERPRINT"
         printf 'Kernel validated cache reused: %s\n' "$KERNEL_CACHE_REUSED"
         printf 'Kernel tree/build objects reused: %s\n' "$KERNEL_TREE_REUSED"
+        printf 'Radxa BSP repository: %s\n' "$BSP_REPOSITORY"
+        printf 'Radxa BSP requested ref: %s\n' "$BSP_REF"
+        printf 'Radxa BSP expected commit: %s\n' "$BSP_EXPECTED_COMMIT"
 
         if [[ "$KERNEL_TREE_REUSED" == "0" ]]; then
             printf 'Kernel status:\n'
@@ -807,6 +812,8 @@ write_prepare_report() {
         printf 'Kernel input fingerprint: %s\n' "$KERNEL_INPUT_FINGERPRINT"
         printf 'Kernel validated cache reused: %s\n' "$KERNEL_CACHE_REUSED"
         printf 'Kernel tree/build objects reused: %s\n' "$KERNEL_TREE_REUSED"
+        printf 'Radxa BSP ref: %s\n' "$BSP_REF"
+        printf 'Radxa BSP expected commit: %s\n' "$BSP_EXPECTED_COMMIT"
         printf 'Kernel config source: %s\n' \
             "${KERNEL_CONFIG_SOURCE:-arm64 defconfig}"
         printf 'AIC repository: %s\n' "$AIC_REPO"
