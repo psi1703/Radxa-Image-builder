@@ -1006,7 +1006,10 @@ run_arm64_chroot '
         }
     done
 
-    while IFS=$'\t' read -r package status; do
+    package_tab="$(printf "\tX")"
+    package_tab="${package_tab%X}"
+
+    while IFS="$package_tab" read -r package status; do
         [[ "$status" == "ii " ]] || continue
 
         case "$package" in
