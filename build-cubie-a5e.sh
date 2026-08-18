@@ -31,7 +31,13 @@ BUILD_MODE="${BUILD_MODE:-image}"
 OUTPUT_MODE="${OUTPUT_MODE:-device}"
 
 BUILD_ID="${BUILD_ID:-$(date -u '+%Y%m%dT%H%M%SZ')}"
-KERNEL_LOCALVERSION="${KERNEL_LOCALVERSION:-+cubie-a5e.${BUILD_ID}}"
+REQUESTED_KERNEL_LOCALVERSION="${KERNEL_LOCALVERSION:-}"
+KERNEL_CONFIG_SOURCE="${KERNEL_CONFIG_SOURCE:-}"
+KERNEL_REBUILD="${KERNEL_REBUILD:-0}"
+AIC_REBUILD="${AIC_REBUILD:-0}"
+KERNEL_LOCALVERSION=""
+KERNEL_INPUT_FINGERPRINT=""
+AIC_INPUT_FINGERPRINT=""
 IMAGE_SIZE_GIB="${IMAGE_SIZE_GIB:-4}"
 IMAGE_XZ_LEVEL="${IMAGE_XZ_LEVEL:-6}"
 IMAGE_XZ_THREADS="${IMAGE_XZ_THREADS:-0}"
@@ -73,7 +79,10 @@ readonly CONFIRM_WRITE
 readonly BUILD_MODE
 readonly OUTPUT_MODE
 readonly BUILD_ID
-readonly KERNEL_LOCALVERSION
+readonly REQUESTED_KERNEL_LOCALVERSION
+readonly KERNEL_CONFIG_SOURCE
+readonly KERNEL_REBUILD
+readonly AIC_REBUILD
 readonly IMAGE_SIZE_GIB
 readonly IMAGE_XZ_LEVEL
 readonly IMAGE_XZ_THREADS
@@ -101,7 +110,8 @@ export TARGET_DEVICE
 export CROSS_COMPILE JOBS CONFIRM_WRITE BUILD_ID LOG_ROOT LOG_DIR
 export BUILD_LOG COMMAND_LOG ENVIRONMENT_LOG STAGE_LOG FAILURE_LOG
 export TARGET_LOG SUMMARY_LOG CURRENT_STAGE STAGE_NAME BUILD_MODE OUTPUT_MODE
-export KERNEL_LOCALVERSION
+export KERNEL_CONFIG_SOURCE KERNEL_REBUILD AIC_REBUILD
+export KERNEL_LOCALVERSION KERNEL_INPUT_FINGERPRINT AIC_INPUT_FINGERPRINT
 
 stages=("10-prepare-host.sh")
 
@@ -198,6 +208,10 @@ capture_environment() {
         printf 'Confirmation mode: %s\n' "$CONFIRM_WRITE"
         printf 'Build mode: %s\n' "$BUILD_MODE"
         printf 'Kernel local version: %s\n' "$KERNEL_LOCALVERSION"
+        printf 'Kernel input fingerprint: %s\n' "$KERNEL_INPUT_FINGERPRINT"
+        printf 'AIC8800 input fingerprint: %s\n' "$AIC_INPUT_FINGERPRINT"
+        printf 'Forced kernel rebuild: %s\n' "$KERNEL_REBUILD"
+        printf 'Forced AIC8800 rebuild: %s\n' "$AIC_REBUILD"
         printf 'Hostname: %s\n' "$(hostname)"
         printf 'Kernel: %s\n' "$(uname -a)"
         printf 'User: %s\n' "$(id)"
@@ -533,8 +547,8 @@ install_required_host_packages() {
 
 require_host_commands() {
     local commands=(
-        awk bash blockdev date df findmnt flock grep head lsblk make
-        mountpoint nproc readlink sed sha256sum sort sync tee udevadm umount
+        awk bash blockdev date df dtc findmnt flock grep head lsblk make
+        mountpoint nproc pahole readlink sed sha256sum sort sync tee udevadm umount
     )
     local command_name
 
@@ -547,6 +561,131 @@ require_host_commands() {
             die "Required host command is missing: $command_name"
     done
 
+}
+
+validate_cache_settings() {
+    case "$KERNEL_REBUILD" in
+        0 | 1) ;;
+        *) die "KERNEL_REBUILD must be 0 or 1, got: $KERNEL_REBUILD" ;;
+    esac
+
+    case "$AIC_REBUILD" in
+        0 | 1) ;;
+        *) die "AIC_REBUILD must be 0 or 1, got: $AIC_REBUILD" ;;
+    esac
+}
+
+compute_build_fingerprints() {
+    local compiler_command="${CROSS_COMPILE}gcc"
+    local compiler_path
+    local compiler_version
+    local linker_command="${CROSS_COMPILE}ld"
+    local linker_path
+    local linker_version
+    local assembler_command="${CROSS_COMPILE}as"
+    local assembler_path
+    local assembler_version
+    local dtc_version
+    local make_version
+    local pahole_version
+    local config_hash="arm64-defconfig"
+    local kernel_base_fingerprint
+    local input_file
+    local kernel_input_files=(
+        "$SCRIPT_DIR/10-prepare-host.sh"
+        "$SCRIPT_DIR/20-backport-gmac1.sh"
+        "$SCRIPT_DIR/25-apply-hardware-dts.sh"
+        "$SCRIPT_DIR/30-build-kernel.sh"
+    )
+
+    command -v "$compiler_command" >/dev/null 2>&1 ||
+        die "Cross compiler is unavailable after host package installation: $compiler_command"
+    command -v "$linker_command" >/dev/null 2>&1 ||
+        die "Cross linker is unavailable after host package installation: $linker_command"
+    command -v "$assembler_command" >/dev/null 2>&1 ||
+        die "Cross assembler is unavailable after host package installation: $assembler_command"
+
+    compiler_path="$(command -v "$compiler_command")"
+    compiler_version="$("$compiler_command" --version | sed -n '1p')"
+    linker_path="$(command -v "$linker_command")"
+    linker_version="$("$linker_command" --version | sed -n '1p')"
+    assembler_path="$(command -v "$assembler_command")"
+    assembler_version="$("$assembler_command" --version | sed -n '1p')"
+    dtc_version="$(dtc --version | sed -n '1p')"
+    make_version="$(make --version | sed -n '1p')"
+    pahole_version="$(pahole --version | sed -n '1p')"
+
+    [[ -n "$compiler_version" &&
+       -n "$linker_version" &&
+       -n "$assembler_version" &&
+       -n "$dtc_version" &&
+       -n "$make_version" &&
+       -n "$pahole_version" ]] ||
+        die "Could not determine the complete kernel build-tool identity."
+
+    if [[ -n "$KERNEL_CONFIG_SOURCE" ]]; then
+        need_nonempty_file "$KERNEL_CONFIG_SOURCE"
+        config_hash="$(sha256sum -- "$KERNEL_CONFIG_SOURCE" | awk '{print $1}')"
+    fi
+
+    for input_file in "${kernel_input_files[@]}"; do
+        need_nonempty_file "$input_file"
+    done
+
+    kernel_base_fingerprint="$({
+        printf 'cache-format=1\n'
+        printf 'linux-repository=%s\n' "$LINUX_REPOSITORY"
+        printf 'linux-ref=%s\n' "$LINUX_REF"
+        printf 'linux-commit=%s\n' "$LINUX_EXPECTED_COMMIT"
+        printf 'compiler-path=%s\n' "$compiler_path"
+        printf 'compiler-version=%s\n' "$compiler_version"
+        printf 'compiler-machine=%s\n' "$("$compiler_command" -dumpmachine)"
+        printf 'linker-path=%s\n' "$linker_path"
+        printf 'linker-version=%s\n' "$linker_version"
+        printf 'assembler-path=%s\n' "$assembler_path"
+        printf 'assembler-version=%s\n' "$assembler_version"
+        printf 'dtc-version=%s\n' "$dtc_version"
+        printf 'make-version=%s\n' "$make_version"
+        printf 'pahole-version=%s\n' "$pahole_version"
+        printf 'kernel-config-source=%s\n' "${KERNEL_CONFIG_SOURCE:-arm64-defconfig}"
+        printf 'kernel-config-sha256=%s\n' "$config_hash"
+
+        for input_file in "${kernel_input_files[@]}"; do
+            printf 'input=%s\n' "${input_file#"$SCRIPT_DIR"/}"
+            sha256sum -- "$input_file"
+        done
+    } | sha256sum | awk '{print $1}')"
+
+    if [[ -n "$REQUESTED_KERNEL_LOCALVERSION" ]]; then
+        KERNEL_LOCALVERSION="$REQUESTED_KERNEL_LOCALVERSION"
+    else
+        KERNEL_LOCALVERSION="+cubie-a5e.k${kernel_base_fingerprint:0:12}"
+    fi
+
+    [[ "$KERNEL_LOCALVERSION" =~ ^\+[A-Za-z0-9._+-]+$ ]] ||
+        die "KERNEL_LOCALVERSION must start with + and contain only kernel-safe characters."
+
+    KERNEL_INPUT_FINGERPRINT="$({
+        printf 'kernel-base=%s\n' "$kernel_base_fingerprint"
+        printf 'kernel-localversion=%s\n' "$KERNEL_LOCALVERSION"
+    } | sha256sum | awk '{print $1}')"
+
+    AIC_INPUT_FINGERPRINT="$({
+        printf 'cache-format=1\n'
+        printf 'kernel-fingerprint=%s\n' "$KERNEL_INPUT_FINGERPRINT"
+        printf 'aic-repository=%s\n' "$AIC_REPOSITORY"
+        printf 'aic-ref=%s\n' "$AIC_REF"
+        printf 'aic-commit=%s\n' "$AIC_EXPECTED_COMMIT"
+        printf 'compiler-path=%s\n' "$compiler_path"
+        printf 'compiler-version=%s\n' "$compiler_version"
+        sha256sum -- "$SCRIPT_DIR/40-build-aic8800.sh"
+    } | sha256sum | awk '{print $1}')"
+
+    export KERNEL_LOCALVERSION KERNEL_INPUT_FINGERPRINT AIC_INPUT_FINGERPRINT
+
+    log "Kernel cache fingerprint: $KERNEL_INPUT_FINGERPRINT"
+    log "Stable kernel local version: $KERNEL_LOCALVERSION"
+    log "AIC8800 cache fingerprint: $AIC_INPUT_FINGERPRINT"
 }
 
 validate_output_settings() {
@@ -791,6 +930,11 @@ write_summary() {
         printf 'Duration: %s\n' "$(duration_text "$elapsed")"
         printf 'Kernel source: %s\n' "$KERNEL_DIR"
         printf 'AIC repository: %s\n' "$AIC_REPO"
+        printf 'Kernel release: %s\n' "$(<"$BUILD_ROOT/.one-shot-kernel-release")"
+        printf 'Kernel input fingerprint: %s\n' "$KERNEL_INPUT_FINGERPRINT"
+        printf 'AIC8800 input fingerprint: %s\n' "$AIC_INPUT_FINGERPRINT"
+        printf 'Forced kernel rebuild: %s\n' "$KERNEL_REBUILD"
+        printf 'Forced AIC8800 rebuild: %s\n' "$AIC_REBUILD"
         printf 'Signed update bundle: %s\n' \
             "$(<"$BUILD_ROOT/.one-shot-update-bundle")"
         printf 'Single-kernel steady state: yes\n'
@@ -842,16 +986,14 @@ main() {
         *) die "BUILD_MODE must be image or update-bundle, got: $BUILD_MODE" ;;
     esac
 
+    validate_cache_settings
     validate_output_settings
-
-    [[ "$KERNEL_LOCALVERSION" =~ ^\+[A-Za-z0-9._+-]+$ ]] ||
-        die "KERNEL_LOCALVERSION must start with + and contain only kernel-safe characters."
-
     validate_paths
     install_required_host_packages
     require_host_commands
-    acquire_build_lock
     validate_source_inputs
+    compute_build_fingerprints
+    acquire_build_lock
 
     if [[ "$BUILD_MODE" == "image" ]]; then
         if [[ "$OUTPUT_MODE" == "device" ]]; then
@@ -889,6 +1031,9 @@ main() {
     log "Build mode: $BUILD_MODE"
     log "Output mode: $OUTPUT_MODE"
     log "Kernel source: $KERNEL_DIR"
+    log "Kernel release: $(<"$BUILD_ROOT/.one-shot-kernel-release")"
+    log "Kernel cache fingerprint: $KERNEL_INPUT_FINGERPRINT"
+    log "AIC8800 cache fingerprint: $AIC_INPUT_FINGERPRINT"
     log "Signed update bundle: $(<"$BUILD_ROOT/.one-shot-update-bundle")"
     log "Expected interfaces: GMAC0=eth0, GMAC1=eth1, AIC8800=wlan0"
 
