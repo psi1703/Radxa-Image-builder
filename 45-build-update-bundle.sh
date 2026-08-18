@@ -30,6 +30,8 @@ readonly PRIVATE_KEY="${UPDATE_PRIVATE_KEY:-$SIGNING_DIR/cubie-a5e-update-privat
 readonly PUBLIC_KEY="${UPDATE_PUBLIC_KEY:-$SIGNING_DIR/cubie-a5e-update-public.pem}"
 readonly BUNDLE_OUTPUT_DIR="${BUNDLE_OUTPUT_DIR:-$BUILD_ROOT/update-bundles}"
 readonly BUNDLE_WORK_ROOT="${BUNDLE_WORK_ROOT:-$BUILD_ROOT/update-bundle-work}"
+readonly CACHE_DIR="$BUILD_ROOT/cache"
+readonly BUNDLE_CACHE_STATE="$CACHE_DIR/update-bundle.env"
 
 if [[ -n "${LOG_DIR:-}" ]]; then
     mkdir -p -- "$LOG_DIR"
@@ -43,6 +45,8 @@ UPDATE_VERSION=""
 BUNDLE_PATH=""
 WORK_DIR=""
 PAYLOAD_ROOT=""
+BUNDLE_INPUT_FINGERPRINT=""
+BUNDLE_CACHE_REUSED=0
 
 require_command() {
     command -v "$1" >/dev/null 2>&1 ||
@@ -52,6 +56,115 @@ require_command() {
 require_nonempty_file() {
     [[ -s "$1" ]] ||
         die "Required file is missing or empty: $1"
+}
+
+cache_value() {
+    local key="$1"
+
+    awk -F= -v wanted="$key" '
+        $1 == wanted {
+            sub(/^[^=]*=/, "")
+            print
+            exit
+        }
+    ' "$BUNDLE_CACHE_STATE" 2>/dev/null
+}
+
+public_key_fingerprint() {
+    openssl pkey \
+        -pubin \
+        -in "$PUBLIC_KEY" \
+        -outform DER |
+        sha256sum |
+        awk '{print $1}'
+}
+
+compute_bundle_fingerprint() {
+    local firmware_file
+    local module
+    local safe_version
+
+    BUNDLE_INPUT_FINGERPRINT="$({
+        printf 'cache-format=1\n'
+        printf 'update-version=%s\n' "$UPDATE_VERSION"
+        printf 'kernel-release=%s\n' "$KERNEL_RELEASE"
+        printf 'kernel-commit=%s\n' "$(git -C "$KERNEL_DIR" rev-parse HEAD)"
+        printf 'aic-commit=%s\n' "$(git -C "$AIC_REPO" rev-parse HEAD)"
+        printf 'public-key-fingerprint=%s\n' "$(public_key_fingerprint)"
+        printf 'stage-script-sha256=%s\n' \
+            "$(sha256sum -- "$SCRIPT_DIR/45-build-update-bundle.sh" | awk '{print $1}')"
+        printf 'kernel-image-sha256=%s\n' \
+            "$(sha256sum -- "$IMAGE_SRC" | awk '{print $1}')"
+        printf 'kernel-config-sha256=%s\n' \
+            "$(sha256sum -- "$CONFIG_SRC" | awk '{print $1}')"
+        printf 'board-dtb-sha256=%s\n' \
+            "$(sha256sum -- "$DTB_SRC" | awk '{print $1}')"
+
+        while IFS= read -r module; do
+            [[ -n "$module" ]] || continue
+            printf 'module=%s:%s\n' \
+                "$(basename -- "$module")" \
+                "$(sha256sum -- "$module" | awk '{print $1}')"
+        done <"$AIC_MODULE_LIST"
+
+        while IFS= read -r -d '' firmware_file; do
+            printf 'firmware=%s:%s\n' \
+                "${firmware_file#"$FIRMWARE_SRC"/}" \
+                "$(sha256sum -- "$firmware_file" | awk '{print $1}')"
+        done < <(find "$FIRMWARE_SRC" -type f -print0 | sort -z)
+    } | sha256sum | awk '{print $1}')"
+
+    safe_version="${UPDATE_VERSION//+/_}"
+    BUNDLE_PATH="$BUNDLE_OUTPUT_DIR/cubie-a5e-kernel-${safe_version}.tar.gz"
+}
+
+validated_bundle_cache_available() {
+    local actual_bundle_hash
+    local cached_bundle_hash
+
+    [[ -s "$BUNDLE_CACHE_STATE" ]] || return 1
+    [[ "$(cache_value cache_format)" == "1" ]] || return 1
+    [[ "$(cache_value fingerprint)" == "$BUNDLE_INPUT_FINGERPRINT" ]] || return 1
+    [[ "$(cache_value bundle_path)" == "$BUNDLE_PATH" ]] || return 1
+    [[ "$(cache_value public_key_fingerprint)" == "$(public_key_fingerprint)" ]] || return 1
+    [[ -s "$BUNDLE_PATH" ]] || return 1
+
+    cached_bundle_hash="$(cache_value bundle_sha256)"
+    [[ "$cached_bundle_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
+    actual_bundle_hash="$(sha256sum -- "$BUNDLE_PATH" | awk '{print $1}')"
+    [[ "$actual_bundle_hash" == "$cached_bundle_hash" ]] || return 1
+
+    tar -tzf "$BUNDLE_PATH" >/dev/null 2>&1 || return 1
+    tar -xOf "$BUNDLE_PATH" manifest.env 2>/dev/null |
+        grep -Fxq "UPDATE_VERSION=$UPDATE_VERSION" || return 1
+    tar -xOf "$BUNDLE_PATH" manifest.env 2>/dev/null |
+        grep -Fxq "KERNEL_RELEASE=$KERNEL_RELEASE" || return 1
+    openssl dgst \
+        -sha256 \
+        -verify "$PUBLIC_KEY" \
+        -signature <(tar -xOf "$BUNDLE_PATH" SHA256SUMS.sig 2>/dev/null) \
+        <(tar -xOf "$BUNDLE_PATH" SHA256SUMS 2>/dev/null) \
+        >/dev/null 2>&1 || return 1
+
+    return 0
+}
+
+write_bundle_cache_state() {
+    local temporary_state
+
+    mkdir -p -- "$CACHE_DIR"
+    temporary_state="$(mktemp "$CACHE_DIR/.update-bundle.XXXXXX")"
+
+    {
+        printf 'cache_format=1\n'
+        printf 'fingerprint=%s\n' "$BUNDLE_INPUT_FINGERPRINT"
+        printf 'bundle_path=%s\n' "$BUNDLE_PATH"
+        printf 'bundle_sha256=%s\n' "$(sha256sum -- "$BUNDLE_PATH" | awk '{print $1}')"
+        printf 'public_key_fingerprint=%s\n' "$(public_key_fingerprint)"
+    } >"$temporary_state"
+
+    chmod 0644 "$temporary_state"
+    mv -f -- "$temporary_state" "$BUNDLE_CACHE_STATE"
 }
 
 cleanup() {
@@ -260,14 +373,7 @@ sign_and_package() {
 write_report() {
     local key_fingerprint
 
-    key_fingerprint="$(
-        openssl pkey \
-            -pubin \
-            -in "$PUBLIC_KEY" \
-            -outform DER |
-            sha256sum |
-            awk '{print $1}'
-    )"
+    key_fingerprint="$(public_key_fingerprint)"
 
     {
         printf 'Cubie A5E signed update bundle report\n'
@@ -275,6 +381,8 @@ write_report() {
         printf 'Status: PASS\n'
         printf 'Update version: %s\n' "$UPDATE_VERSION"
         printf 'Kernel release: %s\n' "$KERNEL_RELEASE"
+        printf 'Bundle input fingerprint: %s\n' "$BUNDLE_INPUT_FINGERPRINT"
+        printf 'Validated bundle cache reused: %s\n' "$BUNDLE_CACHE_REUSED"
         printf 'Bundle: %s\n' "$BUNDLE_PATH"
         printf 'Bundle SHA256: %s\n' "$(sha256sum "$BUNDLE_PATH" | awk '{print $1}')"
         printf 'Signing public key: %s\n' "$PUBLIC_KEY"
@@ -291,8 +399,11 @@ main() {
 
     for command_name in \
         awk \
+        basename \
+        chmod \
         find \
         git \
+        grep \
         install \
         make \
         mktemp \
@@ -320,12 +431,31 @@ main() {
     validate_inputs
     ensure_signing_key
     derive_update_version
+    compute_bundle_fingerprint
+
+    if validated_bundle_cache_available; then
+        BUNDLE_CACHE_REUSED=1
+        printf '%s\n' "$BUNDLE_PATH" >"$UPDATE_BUNDLE_FILE"
+        write_report
+
+        log "Reusing validated signed update bundle: $BUNDLE_PATH"
+        log "Bundle cache fingerprint: $BUNDLE_INPUT_FINGERPRINT"
+        log "Bundle report: $BUNDLE_REPORT"
+        return 0
+    fi
+
+    BUNDLE_CACHE_REUSED=0
+    rm -f -- "$BUNDLE_CACHE_STATE"
+    log "Update-bundle cache miss; staging and signing a fresh bundle."
+
     prepare_payload
     write_manifest
     sign_and_package
     write_report
+    write_bundle_cache_state
 
     log "Signed update bundle created: $BUNDLE_PATH"
+    log "Update-bundle cache state: $BUNDLE_CACHE_STATE"
     log "Back up the private signing key securely: $PRIVATE_KEY"
     log "Bundle report: $BUNDLE_REPORT"
 }
