@@ -295,6 +295,15 @@ grep -Fxq 'CONFIG_SUN55I_PCK600=y' "$root_config" ||
 grep -Fxq 'CONFIG_PM_GENERIC_DOMAINS=y' "$root_config" ||
     die "Installed kernel lacks generic power-domain support."
 
+grep -Fxq 'CONFIG_AW_PCIE_RC=y' "$root_config" ||
+    die "Installed kernel does not build the Allwinner PCIe host driver in."
+
+grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=y' "$root_config" ||
+    die "Installed kernel does not build the PCIe combo PHY in."
+
+grep -Fxq 'CONFIG_BLK_DEV_NVME=y' "$root_config" ||
+    die "Installed kernel does not build the NVMe host driver in."
+
 grep -Fxq 'CONFIG_PWRSEQ_SIMPLE=y' "$root_config" ||
     die "Installed kernel does not build the simple MMC power sequencer in."
 
@@ -1379,6 +1388,9 @@ local mmc_pwrseq
 local mmc_vmmc
 local mmc_vqmmc
 local pck600_phandle
+local combophy_phandle
+local pcie_phy
+local pcie_power_domain
 local pio_pg_supply
 local pwrseq_phandle
 local r_pio_phandle
@@ -1430,7 +1442,12 @@ grep -qF 'cap-sdio-irq;' "$VALIDATION_DTB" ||
 grep -qF 'non-removable;' "$VALIDATION_DTB" ||
     die "Installed DTB does not mark Wi-Fi as non-removable."
 
-grep -qF 'pins = "PG0", "PG1", "PG2", "PG3", "PG4", "PG5";'     "$VALIDATION_DTB" ||
+[[ "$(
+    fdtget -t s \
+        "$target_dtb" \
+        /soc/pinctrl@2000000/mmc1-pins \
+        pins
+)" == "PG0 PG1 PG2 PG3 PG4 PG5" ]] ||
     die "Installed DTB lacks the mmc1 PG0-PG5 pin group."
 
 grep -qF 'ethernet@4510000' "$VALIDATION_DTB" ||
@@ -1518,6 +1535,36 @@ gmac1_power_domain="$(
     /soc/power-controller@7060000 \
     compatible)" == "allwinner,sun55i-a523-pck-600" ]] ||
     die "Installed DTB lacks the A523 PCK600 controller compatible."
+
+[[ "$(fdtget -t s "$target_dtb" /soc/pcie@4800000 status)" == \
+   "okay" ]] ||
+    die "Installed DTB does not enable PCIe."
+
+[[ "$(fdtget -t s "$target_dtb" /soc/phy@4f00000 status)" == \
+   "okay" ]] ||
+    die "Installed DTB does not enable the PCIe combo PHY."
+
+[[ "$(fdtget -t u \
+    "$target_dtb" \
+    /soc/pcie@4800000 \
+    max-link-speed)" == "2" ]] ||
+    die "Installed DTB does not request PCIe Gen2."
+
+combophy_phandle="$(
+    fdtget -t x "$target_dtb" /soc/phy@4f00000 phandle
+)"
+pcie_phy="$(
+    fdtget -t x "$target_dtb" /soc/pcie@4800000 phys
+)"
+pcie_power_domain="$(
+    fdtget -t x "$target_dtb" /soc/pcie@4800000 power-domains
+)"
+
+[[ "$pcie_phy" == "$combophy_phandle 2" ]] ||
+    die "Installed DTB does not connect PCIe to the combo PHY."
+
+[[ "$pcie_power_domain" == "$pck600_phandle 7" ]] ||
+    die "Installed DTB does not connect PCIe to PCK600 PD_PCIE."
 
 cldo4_phandle="$(
     fdtget -t x \
