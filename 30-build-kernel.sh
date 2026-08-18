@@ -215,6 +215,8 @@ configure_kernel() {
         FW_LOADER PHYLIB
         REALTEK_PHY STMMAC_ETH STMMAC_PLATFORM DWMAC_SUN8I
         DWMAC_SUN55I SUN55I_PCK600 PM_GENERIC_DOMAINS
+        PCI PCI_MSI AW_PCIE_RC PHY_SUNXI_INNO_COMBOPHY
+        NVME_CORE BLK_DEV_NVME
         IKCONFIG IKCONFIG_PROC
     )
     local option
@@ -237,6 +239,9 @@ validate_kernel_config() {
         CONFIG_PHYLIB
         CONFIG_REALTEK_PHY CONFIG_STMMAC_ETH CONFIG_STMMAC_PLATFORM
         CONFIG_DWMAC_SUN8I CONFIG_DWMAC_SUN55I CONFIG_SUN55I_PCK600
+        CONFIG_PCI CONFIG_PCI_MSI CONFIG_AW_PCIE_RC
+        CONFIG_PHY_SUNXI_INNO_COMBOPHY CONFIG_NVME_CORE
+        CONFIG_BLK_DEV_NVME
         CONFIG_PM_GENERIC_DOMAINS CONFIG_IKCONFIG CONFIG_IKCONFIG_PROC
     )
     local option
@@ -295,6 +300,10 @@ validate_board_dtb() {
     local pwrseq_gpio_phandle
     local pwrseq_gpio_pin
     local pwrseq_phandle
+    local combophy_phandle
+    local pcie_phy
+    local pcie_power
+    local pck600_phandle
     local r_pio_phandle
     local wifi_3v3_phandle
     local wifi_interrupt_parent
@@ -323,6 +332,27 @@ validate_board_dtb() {
         "$decompiled_dts"; then
         die "Compiled board DTB contains the obsolete vendor RFKill/rescan contract."
     fi
+
+    [[ "$(fdtget -t s "$BOARD_DTB" /soc/pcie@4800000 status)" == "okay" ]] ||
+        die "Compiled board DTB does not enable PCIe."
+    [[ "$(fdtget -t s "$BOARD_DTB" /soc/phy@4f00000 status)" == "okay" ]] ||
+        die "Compiled board DTB does not enable the PCIe combo PHY."
+    [[ "$(fdtget -t u "$BOARD_DTB" /soc/pcie@4800000 max-link-speed)" == "2" ]] ||
+        die "Compiled board DTB does not request PCIe Gen2."
+
+    combophy_phandle="$(fdtget -t x "$BOARD_DTB" /soc/phy@4f00000 phandle)"
+    pcie_phy="$(fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 phys)"
+    [[ "$pcie_phy" == "$combophy_phandle 2" ]] ||
+        die "Compiled board DTB has the wrong PCIe combo-PHY reference."
+
+    pck600_phandle="$(
+        fdtget -t x "$BOARD_DTB" /soc/power-controller@7060000 phandle
+    )"
+    pcie_power="$(
+        fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 power-domains
+    )"
+    [[ "$pcie_power" == "$pck600_phandle 7" ]] ||
+        die "Compiled board DTB has the wrong PCIe power-domain reference."
 
     grep -qF 'regulator-name = "3v3-wifi";' "$decompiled_dts" ||
         die "Compiled board DTB lacks the PL7-controlled Wi-Fi supply."
@@ -436,6 +466,9 @@ write_reports() {
         printf 'Kernel directory: %s\n' "$KERNEL_DIR"
         printf 'Kernel Image: %s\n' "$KERNEL_IMAGE"
         printf 'Board DTB: %s\n' "$BOARD_DTB"
+        printf 'PCIe root complex: Allwinner v210, Gen2 x1, built in\n'
+        printf 'PCIe combo PHY: Innosilicon, built in\n'
+        printf 'NVMe host driver: built in\n'
         printf 'Wi-Fi power sequence: PM1 reset with 200 ms delay\n'
         printf 'MMC power-sequence reset routing: explicit resets property; reset-gpios use GPIO consumer path\n'
         printf 'Wi-Fi I/O supply: BLDO1 at 1.8 V, always on\n'
