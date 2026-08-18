@@ -14,6 +14,8 @@ export STAGE_NAME="KERNEL"
 : "${KERNEL_DIR:?KERNEL_DIR is not set}"
 : "${CROSS_COMPILE:?CROSS_COMPILE is not set}"
 : "${JOBS:?JOBS is not set}"
+: "${KERNEL_INPUT_FINGERPRINT:?KERNEL_INPUT_FINGERPRINT is not set}"
+: "${KERNEL_REBUILD:=0}"
 
 readonly KERNEL_CONFIG="$KERNEL_DIR/.config"
 readonly SCRIPTS_CONFIG="$KERNEL_DIR/scripts/config"
@@ -27,6 +29,8 @@ readonly PINCTRL_DRIVER="$KERNEL_DIR/drivers/pinctrl/sunxi/pinctrl-sun55i-a523.c
 readonly R_PINCTRL_DRIVER="$KERNEL_DIR/drivers/pinctrl/sunxi/pinctrl-sun55i-a523-r.c"
 readonly MMC_PWRSEQ_SIMPLE_DRIVER="$KERNEL_DIR/drivers/mmc/core/pwrseq_simple.c"
 readonly WENS_REGDB_CERT="$KERNEL_DIR/net/wireless/certs/wens.hex"
+readonly CACHE_DIR="$BUILD_ROOT/cache"
+readonly KERNEL_CACHE_STATE="$CACHE_DIR/kernel-build.env"
 
 if [[ -n "${LOG_DIR:-}" ]]; then
     mkdir -p -- "$LOG_DIR"
@@ -42,6 +46,7 @@ else
 fi
 
 KERNEL_RELEASE=""
+KERNEL_CACHE_REUSED=0
 
 require_command() {
     local command_name="$1"
@@ -53,6 +58,71 @@ require_nonempty_file() {
     local path="$1"
     [[ -s "$path" ]] ||
         die "Required file is missing or empty: $path"
+}
+
+cache_value() {
+    local key="$1"
+
+    awk -F= -v wanted="$key" '
+        $1 == wanted {
+            sub(/^[^=]*=/, "")
+            print
+            exit
+        }
+    ' "$KERNEL_CACHE_STATE" 2>/dev/null
+}
+
+file_matches_cache_hash() {
+    local key="$1"
+    local path="$2"
+    local expected_hash
+    local actual_hash
+
+    [[ -s "$path" ]] || return 1
+    expected_hash="$(cache_value "$key")"
+    [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
+    actual_hash="$(sha256sum -- "$path" | awk '{print $1}')"
+    [[ "$actual_hash" == "$expected_hash" ]]
+}
+
+validated_kernel_cache_available() {
+    [[ "$KERNEL_REBUILD" == "0" ]] || return 1
+    [[ -s "$KERNEL_CACHE_STATE" ]] || return 1
+    [[ "$(cache_value cache_format)" == "1" ]] || return 1
+    [[ "$(cache_value fingerprint)" == "$KERNEL_INPUT_FINGERPRINT" ]] || return 1
+    [[ "$(cache_value kernel_release)" == "$KERNEL_RELEASE" ]] || return 1
+    [[ "$(cache_value linux_commit)" == \
+       "$(git -C "$KERNEL_DIR" rev-parse HEAD 2>/dev/null || true)" ]] || return 1
+
+    file_matches_cache_hash image_sha256 "$KERNEL_IMAGE" || return 1
+    file_matches_cache_hash board_dtb_sha256 "$BOARD_DTB" || return 1
+    file_matches_cache_hash config_sha256 "$KERNEL_CONFIG" || return 1
+    file_matches_cache_hash module_symvers_sha256 "$KERNEL_SYMVERS" || return 1
+    file_matches_cache_hash vmlinux_sha256 "$VMLINUX" || return 1
+
+    return 0
+}
+
+write_kernel_cache_state() {
+    local temporary_state
+
+    mkdir -p -- "$CACHE_DIR"
+    temporary_state="$(mktemp "$CACHE_DIR/.kernel-build.XXXXXX")"
+
+    {
+        printf 'cache_format=1\n'
+        printf 'fingerprint=%s\n' "$KERNEL_INPUT_FINGERPRINT"
+        printf 'kernel_release=%s\n' "$KERNEL_RELEASE"
+        printf 'linux_commit=%s\n' "$(git -C "$KERNEL_DIR" rev-parse HEAD)"
+        printf 'image_sha256=%s\n' "$(sha256sum -- "$KERNEL_IMAGE" | awk '{print $1}')"
+        printf 'board_dtb_sha256=%s\n' "$(sha256sum -- "$BOARD_DTB" | awk '{print $1}')"
+        printf 'config_sha256=%s\n' "$(sha256sum -- "$KERNEL_CONFIG" | awk '{print $1}')"
+        printf 'module_symvers_sha256=%s\n' "$(sha256sum -- "$KERNEL_SYMVERS" | awk '{print $1}')"
+        printf 'vmlinux_sha256=%s\n' "$(sha256sum -- "$VMLINUX" | awk '{print $1}')"
+    } >"$temporary_state"
+
+    chmod 0644 "$temporary_state"
+    mv -f -- "$temporary_state" "$KERNEL_CACHE_STATE"
 }
 
 apply_mmc_pwrseq_simple_fix() {
@@ -361,6 +431,8 @@ write_reports() {
         printf 'Kernel build report\n'
         printf '===================\n'
         printf 'Kernel release: %s\n' "$KERNEL_RELEASE"
+        printf 'Kernel input fingerprint: %s\n' "$KERNEL_INPUT_FINGERPRINT"
+        printf 'Validated kernel cache reused: %s\n' "$KERNEL_CACHE_REUSED"
         printf 'Kernel directory: %s\n' "$KERNEL_DIR"
         printf 'Kernel Image: %s\n' "$KERNEL_IMAGE"
         printf 'Board DTB: %s\n' "$BOARD_DTB"
@@ -384,12 +456,22 @@ write_reports() {
 }
 
 main() {
+    require_command awk
+    require_command chmod
+    require_command git
     require_command make
     require_command grep
     require_command mktemp
+    require_command mv
     require_command python3
     require_command dtc
     require_command fdtget
+    require_command sha256sum
+
+    case "$KERNEL_REBUILD" in
+        0 | 1) ;;
+        *) die "KERNEL_REBUILD must be 0 or 1, got: $KERNEL_REBUILD" ;;
+    esac
 
     need_dir "$KERNEL_DIR"
     require_nonempty_file "$KERNEL_CONFIG"
@@ -397,6 +479,29 @@ main() {
     require_nonempty_file "$WENS_REGDB_CERT"
 
     log "Kernel build stage starting."
+
+    determine_kernel_release
+
+    if validated_kernel_cache_available; then
+        KERNEL_CACHE_REUSED=1
+        log "Reusing validated kernel Image, modules, DTBs, and build objects."
+        log "Kernel cache fingerprint: $KERNEL_INPUT_FINGERPRINT"
+
+        validate_mmc_pwrseq_simple_fix
+        validate_kernel_config
+        validate_kernel_outputs
+        validate_board_dtb
+        write_reports
+
+        log "Kernel cache validation passed: $KERNEL_RELEASE"
+        log "Kernel Image: $KERNEL_IMAGE"
+        log "Board DTB: $BOARD_DTB"
+        return 0
+    fi
+
+    KERNEL_CACHE_REUSED=0
+    rm -f -- "$KERNEL_CACHE_STATE"
+    log "Kernel cache miss; running the required clean or incremental build."
 
     apply_mmc_pwrseq_simple_fix
     validate_mmc_pwrseq_simple_fix
@@ -407,8 +512,10 @@ main() {
     validate_kernel_outputs
     validate_board_dtb
     write_reports
+    write_kernel_cache_state
 
     log "Kernel build passed: $KERNEL_RELEASE"
+    log "Kernel cache state: $KERNEL_CACHE_STATE"
     log "Kernel Image: $KERNEL_IMAGE"
     log "Board DTB: $BOARD_DTB"
     log "Symbol report: $KERNEL_SYMBOL_REPORT"
