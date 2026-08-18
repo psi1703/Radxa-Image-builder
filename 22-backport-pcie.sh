@@ -57,6 +57,7 @@ require_nonempty_file() {
 completed_port_available() {
     [[ -s "$PCIE_STAMP" ]] || return 1
     grep -Fxq "bsp_commit=$BSP_EXPECTED_COMMIT" "$PCIE_STAMP" || return 1
+    grep -Fxq 'dt_layout=64-bit-soc-cells-v2' "$PCIE_STAMP" || return 1
     grep -Fxq 'status=complete' "$PCIE_STAMP" || return 1
     [[ -s "$BOARD_DTB" ]] || return 1
     [[ -s "$KERNEL_DIR/.config" ]] || return 1
@@ -590,8 +591,8 @@ soc_block = r'''
 &{/soc} {
 	combophy: phy@4f00000 {
 		compatible = "allwinner,inno-combphy";
-		reg = <0x04f00000 0x00080000>,
-		      <0x04f80000 0x00080000>;
+		reg = <0 0x04f00000 0 0x00080000>,
+		      <0 0x04f80000 0 0x00080000>;
 		reg-names = "phy-ctl", "phy-clk";
 		power-domains = <&pck600 PD_PCIE>;
 		phy_refclk_sel = <0>;
@@ -609,12 +610,12 @@ soc_block = r'''
 		#address-cells = <3>;
 		#size-cells = <2>;
 		bus-range = <0x00 0xff>;
-		reg = <0x04800000 0x00480000>;
+		reg = <0 0x04800000 0 0x00480000>;
 		reg-names = "dbi";
 		device_type = "pci";
-		ranges = <0x00000800 0 0x20000000 0x20000000 0 0x01000000>,
-			 <0x81000000 0 0x21000000 0x21000000 0 0x01000000>,
-			 <0x82000000 0 0x22000000 0x22000000 0 0x0e000000>;
+		ranges = <0x00000800 0 0x20000000 0 0x20000000 0 0x01000000>,
+			 <0x81000000 0 0x21000000 0 0x21000000 0 0x01000000>,
+			 <0x82000000 0 0x22000000 0 0x22000000 0 0x0e000000>;
 		num-lanes = <1>;
 		phys = <&combophy PHY_TYPE_PCIE>;
 		phy-names = "pcie-phy";
@@ -815,6 +816,15 @@ validate_compiled_dtb() {
         die "Compiled DTB does not enable the combo PHY."
     [[ "$(fdtget -t u "$BOARD_DTB" /soc/pcie@4800000 max-link-speed)" == "2" ]] ||
         die "Compiled DTB does not request PCIe Gen2."
+    [[ "$(fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 reg)" == \
+       "0 4800000 0 480000" ]] ||
+        die "Compiled DTB PCIe register range is incorrect."
+    [[ "$(fdtget -t x "$BOARD_DTB" /soc/phy@4f00000 reg)" == \
+       "0 4f00000 0 80000 0 4f80000 0 80000" ]] ||
+        die "Compiled DTB combo-PHY register ranges are incorrect."
+    [[ "$(fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 ranges)" == \
+       "800 0 20000000 0 20000000 0 1000000 81000000 0 21000000 0 21000000 0 1000000 82000000 0 22000000 0 22000000 0 e000000" ]] ||
+        die "Compiled DTB PCIe outbound address windows are incorrect."
 
     combophy_phandle="$(fdtget -t x "$BOARD_DTB" /soc/phy@4f00000 phandle)"
     pcie_phy="$(fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 phys)"
@@ -836,6 +846,7 @@ write_stamp_and_report() {
         printf 'bsp_ref=%s\n' "$BSP_REF"
         printf 'bsp_commit=%s\n' "$BSP_EXPECTED_COMMIT"
         printf 'linux_compatibility=6.16\n'
+        printf 'dt_layout=64-bit-soc-cells-v2\n'
         printf 'pcie_controller=allwinner,sunxi-pcie-v210-rc\n'
         printf 'pcie_link=gen2-x1\n'
         printf 'nvme_driver=built-in\n'

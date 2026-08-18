@@ -1550,6 +1550,18 @@ gmac1_power_domain="$(
     max-link-speed)" == "2" ]] ||
     die "Installed DTB does not request PCIe Gen2."
 
+[[ "$(fdtget -t x "$target_dtb" /soc/pcie@4800000 reg)" == \
+   "0 4800000 0 480000" ]] ||
+    die "Installed DTB has the wrong PCIe register range."
+
+[[ "$(fdtget -t x "$target_dtb" /soc/phy@4f00000 reg)" == \
+   "0 4f00000 0 80000 0 4f80000 0 80000" ]] ||
+    die "Installed DTB has the wrong combo-PHY register ranges."
+
+[[ "$(fdtget -t x "$target_dtb" /soc/pcie@4800000 ranges)" == \
+   "800 0 20000000 0 20000000 0 1000000 81000000 0 21000000 0 21000000 0 1000000 82000000 0 22000000 0 22000000 0 e000000" ]] ||
+    die "Installed DTB has the wrong PCIe outbound address windows."
+
 combophy_phandle="$(
     fdtget -t x "$target_dtb" /soc/phy@4f00000 phandle
 )"

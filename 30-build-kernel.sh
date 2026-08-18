@@ -339,6 +339,15 @@ validate_board_dtb() {
         die "Compiled board DTB does not enable the PCIe combo PHY."
     [[ "$(fdtget -t u "$BOARD_DTB" /soc/pcie@4800000 max-link-speed)" == "2" ]] ||
         die "Compiled board DTB does not request PCIe Gen2."
+    [[ "$(fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 reg)" == \
+       "0 4800000 0 480000" ]] ||
+        die "Compiled board DTB has the wrong PCIe register range."
+    [[ "$(fdtget -t x "$BOARD_DTB" /soc/phy@4f00000 reg)" == \
+       "0 4f00000 0 80000 0 4f80000 0 80000" ]] ||
+        die "Compiled board DTB has the wrong combo-PHY register ranges."
+    [[ "$(fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 ranges)" == \
+       "800 0 20000000 0 20000000 0 1000000 81000000 0 21000000 0 21000000 0 1000000 82000000 0 22000000 0 22000000 0 e000000" ]] ||
+        die "Compiled board DTB has the wrong PCIe outbound address windows."
 
     combophy_phandle="$(fdtget -t x "$BOARD_DTB" /soc/phy@4f00000 phandle)"
     pcie_phy="$(fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 phys)"
