@@ -23,15 +23,15 @@ The generated image creates the local account `initbox` with password `init`. Th
 
 ```text
 .
-├── build-cubie-a5e.sh             # top-level build wrapper
-├── 10-...sh through 80-...sh      # ordered build and validation stages
-├── base/                           # donor-image and Debian rootfs writer
-├── assets/                         # small board runtime assets tracked by Git
-├── config/source-pins.env          # pinned upstream refs and donor checksum
-├── docs/                           # build flow and validated hardware record
-├── lib/common.sh                   # shared shell helpers
-├── tools/validate-repository.sh    # optional local source validation
-└── build/                          # downloads, sources, build state, logs and keys
+â”œâ”€â”€ build-cubie-a5e.sh             # top-level build wrapper
+â”œâ”€â”€ 10-...sh through 80-...sh      # ordered build and validation stages
+â”œâ”€â”€ base/                           # donor-image and Debian rootfs writer
+â”œâ”€â”€ assets/                         # small board runtime assets tracked by Git
+â”œâ”€â”€ config/source-pins.env          # pinned upstream refs and donor checksum
+â”œâ”€â”€ docs/                           # build flow and validated hardware record
+â”œâ”€â”€ lib/common.sh                   # shared shell helpers
+â”œâ”€â”€ tools/validate-repository.sh    # optional local source validation
+â””â”€â”€ build/                          # downloads, sources, build state, logs and keys
 ```
 
 Downloaded sources, rootfs files, build objects, logs, update bundles and signing keys stay under the ignored `build/` directory. In Etcher-image mode, the temporary raw image, final compressed image and checksum are created directly under `/home/psi/`; the temporary raw image is removed after successful compression. No file from the old `/home/psi/cubie-a5e-build` layout is required.
@@ -62,6 +62,34 @@ chmod 0755 -- \
 - For Etcher-image creation, enough free space under `/home/psi/` for the raw working image and compressed output.
 
 Required host packages and the Arm64 cross toolchain are installed with `apt-get`.
+
+## Validated build cache
+
+The first build from a fresh clone performs a complete Linux and AIC8800 build. When this cache implementation is introduced on a build machine that already has a completed pre-cache kernel tree, Stage 10 can retain that strictly checked tree for one incremental migration build instead of deleting it; Stage 30 then runs all normal gates and publishes the first guarded cache state. After a successful cache-aware build, the wrapper reuses the compiled kernel, external Wi-Fi modules and signed update bundle only when their recorded fingerprints and output hashes still pass validation.
+
+The kernel fingerprint covers the pinned Linux source, all kernel backport/DTS/config/build scripts, an optional external kernel configuration, the compiler/linker/assembler and other kernel build-tool identities, and the kernel local version. The AIC8800 fingerprint also covers its pinned source and module-build script. Changes limited to image creation, rootfs installation, network policy, Stage 80 validation or documentation therefore do not trigger an unnecessary kernel rebuild.
+
+The image `BUILD_ID` remains timestamped for logs and output filenames. The kernel local version is stable and derived from its inputs, for example `+cubie-a5e.k<12-hex-digits>`. A different Linux pin, backport, DTS, kernel configuration, compiler or explicit `KERNEL_LOCALVERSION` produces a new fingerprint and a clean kernel rebuild automatically. An AIC8800-only input change rebuilds only the external Wi-Fi modules. The signed update bundle is reused only when its exact kernel, DTB, configuration, AIC8800 modules, firmware and signing-key fingerprint still match.
+
+To force a clean kernel and AIC8800 rebuild even when the cache is valid:
+
+```bash
+sudo env \
+  OUTPUT_MODE=etcher-image \
+  KERNEL_REBUILD=1 \
+  ./build-cubie-a5e.sh
+```
+
+To rebuild only the AIC8800 external modules:
+
+```bash
+sudo env \
+  OUTPUT_MODE=etcher-image \
+  AIC_REBUILD=1 \
+  ./build-cubie-a5e.sh
+```
+
+Successful cache metadata is stored under `build/cache/`. Missing, stale, inconsistent or hash-mismatched cache state is never trusted; the affected component is rebuilt and the cache is recorded again only after all existing validation gates pass.
 
 ## Write directly to an SD card or SSD
 
@@ -153,6 +181,7 @@ Stage 20 names and verifies all nine required upstream Linux backport commit IDs
 | Build logs | `build/logs/<build-id>/` |
 | Kernel tree | `build/linux-6.16-one-shot/` |
 | AIC8800 tree | `build/aic8800-radxa/` |
+| Validated build-cache metadata | `build/cache/` |
 | Debian rootfs | `build/rootfs/` |
 | Signed update bundles | `build/update-bundles/` |
 | Flashable image and checksum | `/home/psi/cubie-a5e-debian13-linux6.16-<build-id>.img.xz{,.sha256}` |
