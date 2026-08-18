@@ -2,13 +2,13 @@
 
 | Stage | Role | Persistent output |
 | --- | --- | --- |
-| 10 | Install host packages, verify the Radxa donor image, and fetch pinned source trees | `build/downloads/`, Linux tree, and AIC8800 tree |
+| 10 | Install host packages, verify the Radxa donor image, refresh declared pins, and reuse or recreate validated source/build caches | `build/downloads/`, Linux tree, AIC8800 tree, and `build/cache/` |
 | 15 | Create or reuse the Debian 13 Arm64 rootfs | `build/rootfs/` |
 | 20 | Apply nine pinned upstream backports for the AXP313 regulator, PCK600, GMAC200, and SRAM/syscon support | Modified disposable Linux tree |
 | 25 | Apply and validate the Cubie A5E hardware DTS | Kernel DTS and DTB inputs |
-| 30 | Build Linux, DTBs, and in-tree modules | Kernel tree and release marker |
-| 40 | Build and validate the AIC8800 SDIO modules | AIC8800 tree and module manifest |
-| 45 | Create and sign the managed kernel/vendor update bundle | `build/update-bundles/` and local signing identity |
+| 30 | Reuse hash-validated kernel outputs or build Linux, DTBs, and in-tree modules, then record successful cache state | Kernel tree, release marker, and kernel cache metadata |
+| 40 | Reuse hash-validated AIC8800 outputs or build and validate the SDIO modules, then record successful cache state | AIC8800 tree, module manifest, and AIC8800 cache metadata |
+| 45 | Reuse an exact validated bundle or create and sign the managed kernel/vendor update bundle | `build/update-bundles/`, bundle cache metadata, and local signing identity |
 | 50 | Write the Radxa donor disk layout, replace partition 3 with Debian 13, and expand it to the selected target or image size | Physical target or image-backed loop device |
 | 60 | Install the kernel, DTB, firmware, packages, login policy, updater, `rsetup`, and first-boot root-filesystem expansion service | Physical target or image-backed loop device |
 | 70 | Install the deterministic interface and NetworkManager policy | Physical target or image-backed loop device |
@@ -21,6 +21,18 @@ The official Radxa donor image supplies only the board's known-good boot chain a
 Large inputs and build products are reproducible downloads or generated outputs and are intentionally excluded from Git. The small files under `assets/` are the exact board-specific runtime inputs consumed by the installation and validation stages.
 
 Linux, AIC8800, the donor image, and all nine Linux backports are pinned and verified before use. A missing commit, changed commit subject, moved source ref, or donor checksum mismatch stops the build.
+
+## Cache and rebuild policy
+
+The wrapper calculates a stable kernel-input fingerprint before running the stages. It includes the declared Linux repository/ref/commit, Stages 10/20/25/30, the selected kernel configuration and its content, the Arm64 compiler/linker/assembler identities, the device-tree compiler, `make`, `pahole`, and the kernel local version. The default local version is derived from those inputs rather than from the timestamped image `BUILD_ID`.
+
+Stage 10 always refreshes and verifies the declared Git pins. It preserves the existing Linux tree when `build/cache/kernel-build.env`, the pinned baseline ancestry, the configured local version, the compiled release and the recorded hashes for the kernel Image, board DTB, configuration, `Module.symvers` and `vmlinux` all agree. For the one-time transition from the older non-caching builder, an existing tree without cache metadata may be retained only when it has no interrupted Git operation, descends from the exact pinned baseline, has a complete backport stamp, a valid configuration, and all required compiled outputs. That transition is treated as an incremental cache miss: Stage 30 still applies the stable local version, runs `make`, validates every normal output, and records the first successful cache state. All other missing or invalid states recreate the Linux tree from the declared pin. `KERNEL_REBUILD=1` forces that clean path and invalidates dependent AIC8800 cache state.
+
+Stage 30 repeats the kernel cache checks before using compiled output. A cache hit runs the existing configuration, output and board-DTB validation gates without recompiling. A miss performs the required clean or incremental `make` operation and writes cache metadata atomically only after every validation succeeds.
+
+The AIC8800 fingerprint depends on the kernel fingerprint, declared AIC8800 source pin, cross-compiler and Stage 40. Stages 10 and 40 verify the pinned AIC8800 commit, kernel release, module hashes, BSP symbol/version data, compiler flags, vermagic and imported-symbol policy before reuse. `AIC_REBUILD=1` forces only the external module rebuild; `KERNEL_REBUILD=1` forces both kernel and AIC8800 rebuilds.
+
+Stage 45 fingerprints the exact kernel Image, configuration, DTB, AIC8800 modules, firmware, source commits, stage implementation and persistent signing public key. An existing signed bundle is reused only when that fingerprint, bundle hash, archive structure and manifest version/release all match. Cache metadata remains under ignored `build/cache/`; incomplete or failed builds never publish new successful cache state.
 
 ## Build modes
 
