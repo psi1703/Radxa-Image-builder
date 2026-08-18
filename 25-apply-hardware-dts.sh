@@ -47,6 +47,14 @@ require_nonempty_file() {
         die "Required file is missing or empty: $path"
 }
 
+print_managed_block() {
+    awk -v begin="$MARK_BEGIN" -v end="$MARK_END" '
+        $0 == begin { printing = 1 }
+        printing { print }
+        $0 == end { printing = 0 }
+    ' "$DTS"
+}
+
 remove_existing_managed_block() {
     log "Removing any existing one-shot DTS block."
 
@@ -322,12 +330,12 @@ if end < 0 or "regulator-always-on;" not in text[start:end]:
     raise SystemExit("BLDO1 is not marked regulator-always-on")
 PY
 
-    if sed -n "/$MARK_BEGIN/,/$MARK_END/p" "$DTS" |
+    if print_managed_block |
         grep -Eq 'sunxi-rfkill|sunxi-wlan|wlan_busnum|wlan_power'; then
         die "Managed DTS block must use native MMC/SDIO power and must not add the vendor RFKill contract."
     fi
 
-    if sed -n "/$MARK_BEGIN/,/$MARK_END/p" "$DTS" |
+    if print_managed_block |
         grep -qF '&mmc1_pins {'; then
         die "Managed DTS block must retain the SoC mmc1 pin drive strength and must not override mmc1_pins."
     fi
@@ -359,12 +367,12 @@ PY
     grep -qF 'interrupt-names = "host-wake";' "$DTS" ||
         die "AIC8800 host-wake interrupt name is missing."
 
-    if sed -n "/$MARK_BEGIN/,/$MARK_END/p" "$DTS" |
+    if print_managed_block |
         grep -qF 'vmmc-supply = <&reg_bldo1>;'; then
         die "mmc1 vmmc must not use the BLDO1 I/O rail."
     fi
 
-    if sed -n "/$MARK_BEGIN/,/$MARK_END/p" "$DTS" |
+    if print_managed_block |
         grep -Eq '^&gmac1|^&mdio1|ethernet1[[:space:]]*='; then
         die "Stage 25 must not modify GMAC1."
     fi
@@ -433,8 +441,12 @@ decompile_and_validate_dtb() {
     grep -qF 'non-removable;' "$DTB_DECOMPILED" ||
         die "Compiled DTB does not mark Wi-Fi non-removable."
 
-    grep -qF 'pins = "PG0", "PG1", "PG2", "PG3", "PG4", "PG5";' \
-        "$DTB_DECOMPILED" ||
+    [[ "$(
+        fdtget -t s \
+            "$DTB" \
+            /soc/pinctrl@2000000/mmc1-pins \
+            pins
+    )" == "PG0 PG1 PG2 PG3 PG4 PG5" ]] ||
         die "Compiled DTB does not contain the mmc1 PG0-PG5 pin group."
 
     [[ "$(fdtget -t s "$DTB" /soc/mmc@4021000 status)" == "okay" ]] ||
@@ -609,13 +621,27 @@ write_report() {
     } >"$DTS_REPORT"
 }
 
+commit_hardware_dts() {
+    git -C "$KERNEL_DIR" add -- \
+        arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dts \
+        arch/arm64/boot/dts/allwinner/sun55i-a523.dtsi \
+        drivers/pinctrl/sunxi/pinctrl-sun55i-a523.c \
+        drivers/pinctrl/sunxi/pinctrl-sun55i-a523-r.c
+
+    if ! git -C "$KERNEL_DIR" diff --cached --quiet; then
+        run git -C "$KERNEL_DIR" commit \
+            -m "arm64: allwinner: apply Cubie A5E hardware configuration"
+    fi
+}
+
 main() {
+    require_command awk
     require_command python3
     require_command make
     require_command dtc
     require_command fdtget
+    require_command git
     require_command grep
-    require_command sed
 
     need_dir "$KERNEL_DIR"
     require_nonempty_file "$DTS"
@@ -634,6 +660,7 @@ main() {
     validate_source_dts
     build_board_dtb
     decompile_and_validate_dtb
+    commit_hardware_dts
     write_report
 
     log "Hardware DTS applied and compiled successfully."
