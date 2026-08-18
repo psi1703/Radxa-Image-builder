@@ -56,6 +56,13 @@ readonly INITBOX_PASSWORD_FILE="$ROOT_MNT/tmp/.cubie-a5e-initbox-password"
 readonly RESOLVER_BACKUP="$BUILD_ROOT/.one-shot-resolv.conf.backup"
 readonly RESOLVER_LINK_FILE="$BUILD_ROOT/.one-shot-resolv.conf.link"
 
+readonly RUNTIME_CACHE_SCHEMA="stage60-runtime-rootfs-v1"
+readonly RUNTIME_CACHE_MAX_AGE_SECONDS="${RUNTIME_CACHE_MAX_AGE_SECONDS:-86400}"
+readonly RUNTIME_CACHE_REBUILD="${RUNTIME_CACHE_REBUILD:-0}"
+readonly RUNTIME_CACHE_DIR="$BUILD_ROOT/cache/stage60-runtime-rootfs"
+readonly RUNTIME_CACHE_ROOTFS="$RUNTIME_CACHE_DIR/rootfs"
+readonly RUNTIME_CACHE_STATE="$RUNTIME_CACHE_DIR/state.env"
+
 if [[ -n "${LOG_DIR:-}" ]]; then
 mkdir -p -- "$LOG_DIR"
 readonly INSTALL_REPORT="$LOG_DIR/linux-6.16-install-report.txt"
@@ -78,6 +85,9 @@ SAME_FS=0
 RESOLVER_PREPARED=0
 QEMU_INSTALLED_BY_STAGE=0
 QEMU_TARGET_PATH="$ROOT_MNT/usr/bin/qemu-aarch64-static"
+RUNTIME_CACHE_FINGERPRINT=""
+RUNTIME_CACHE_STATUS="miss"
+RUNTIME_CACHE_TEMP=""
 
 require_command() {
 local command_name="$1"
@@ -170,6 +180,11 @@ local path
 set +e
 
 rm -f -- "$INITBOX_PASSWORD_FILE"
+
+if [[ -n "$RUNTIME_CACHE_TEMP" &&
+      "$RUNTIME_CACHE_TEMP" == "$BUILD_ROOT/cache/.stage60-runtime-rootfs."* ]]; then
+    rm -rf -- "$RUNTIME_CACHE_TEMP"
+fi
 
 restore_chroot_resolver
 
@@ -677,6 +692,378 @@ diff -u \
     "$ROOT_MNT/etc/modprobe.d/cubie-a5e-aic8800.conf" ||
     die "AIC8800 module policy is incorrect."
 
+}
+
+validate_runtime_cache_settings() {
+[[ "$RUNTIME_CACHE_MAX_AGE_SECONDS" =~ ^[0-9]+$ ]] ||
+    die "RUNTIME_CACHE_MAX_AGE_SECONDS must be a non-negative integer."
+
+case "$RUNTIME_CACHE_REBUILD" in
+    0 | 1)
+        ;;
+    *)
+        die "RUNTIME_CACHE_REBUILD must be 0 or 1."
+        ;;
+esac
+
+[[ "$RUNTIME_CACHE_DIR" == "$BUILD_ROOT/cache/stage60-runtime-rootfs" ]] ||
+    die "Unexpected Stage 60 runtime cache path: $RUNTIME_CACHE_DIR"
+
+[[ ! -L "$BUILD_ROOT/cache" ]] ||
+    die "BUILD_ROOT/cache must not be a symbolic link: $BUILD_ROOT/cache"
+[[ ! -L "$RUNTIME_CACHE_DIR" ]] ||
+    die "Stage 60 runtime cache must not be a symbolic link: $RUNTIME_CACHE_DIR"
+[[ ! -L "$RUNTIME_CACHE_ROOTFS" ]] ||
+    die "Stage 60 runtime cache rootfs must not be a symbolic link: $RUNTIME_CACHE_ROOTFS"
+[[ ! -L "$RUNTIME_CACHE_STATE" ]] ||
+    die "Stage 60 runtime cache state must not be a symbolic link: $RUNTIME_CACHE_STATE"
+}
+
+print_runtime_cache_file_digest() {
+local label="$1"
+local path="$2"
+local digest
+
+if [[ -L "$path" ]]; then
+    printf '%s\tsymlink\t%s\n' "$label" "$(readlink -- "$path")"
+elif [[ -f "$path" ]]; then
+    digest="$(sha256sum "$path" | awk '{print $1}')"
+    printf '%s\tfile\t%s\n' "$label" "$digest"
+elif [[ -d "$path" ]]; then
+    printf '%s\tdirectory\n' "$label"
+else
+    printf '%s\tmissing\n' "$label"
+fi
+}
+
+runtime_cache_input_fingerprint() {
+local path
+local relative_path
+
+{
+    printf 'schema\t%s\n' "$RUNTIME_CACHE_SCHEMA"
+    print_runtime_cache_file_digest \
+        stage-script \
+        "${BASH_SOURCE[0]}"
+    print_runtime_cache_file_digest \
+        basic-packages \
+        "$BASIC_PACKAGES_SRC"
+    print_runtime_cache_file_digest \
+        radxa-repository-helper \
+        "$RADXA_REPO_HELPER_SRC"
+    print_runtime_cache_file_digest \
+        kernel-apt-guard \
+        "$KERNEL_APT_GUARD_SRC"
+    print_runtime_cache_file_digest \
+        target-os-release \
+        "$ROOT_MNT/etc/os-release"
+    print_runtime_cache_file_digest \
+        target-rootfs-release \
+        "$ROOT_MNT/etc/cubie-a5e-rootfs-release"
+    print_runtime_cache_file_digest \
+        target-dpkg-status \
+        "$ROOT_MNT/var/lib/dpkg/status"
+
+    while IFS= read -r -d '' path; do
+        relative_path="${path#"$ROOT_MNT"}"
+        print_runtime_cache_file_digest \
+            "target$relative_path" \
+            "$path"
+    done < <(
+        find "$ROOT_MNT/etc/apt" \
+            -xdev \
+            \( -type f -o -type l \) \
+            -print0 2>/dev/null |
+            sort -z
+    )
+
+    for path in \
+        "$ROOT_MNT/usr/bin/rsetup" \
+        "$ROOT_MNT/usr/lib/rsetup" \
+        "$ROOT_MNT/usr/lib/librtui"; do
+        [[ -e "$path" || -L "$path" ]] || continue
+
+        if [[ -d "$path" && ! -L "$path" ]]; then
+            while IFS= read -r -d '' path; do
+                relative_path="${path#"$ROOT_MNT"}"
+                print_runtime_cache_file_digest \
+                    "target$relative_path" \
+                    "$path"
+            done < <(
+                find "$path" \
+                    -xdev \
+                    \( -type f -o -type l \) \
+                    -print0 |
+                    sort -z
+            )
+        else
+            relative_path="${path#"$ROOT_MNT"}"
+            print_runtime_cache_file_digest \
+                "target$relative_path" \
+                "$path"
+        fi
+    done
+} | sha256sum | awk '{print $1}'
+}
+
+runtime_cache_tree_is_valid() {
+local cache_root="$1"
+local candidate
+
+[[ -d "$cache_root" ]] || return 1
+[[ -x "$cache_root/bin/bash" ]] || return 1
+[[ -s "$cache_root/var/lib/dpkg/status" ]] || return 1
+[[ -x "$cache_root/usr/bin/rsetup" ]] || return 1
+[[ -d "$cache_root/usr/lib/rsetup" ]] || return 1
+[[ -d "$cache_root/usr/lib/librtui" ]] || return 1
+[[ -s "$cache_root/usr/share/bash-completion/bash_completion" ]] || return 1
+[[ -x "$cache_root/usr/sbin/update-initramfs" ]] || return 1
+[[ -x "$cache_root/usr/bin/unmkinitramfs" ]] || return 1
+[[ -s "$cache_root/usr/lib/firmware/regulatory.db-upstream" ]] || return 1
+[[ -s "$cache_root/usr/lib/firmware/regulatory.db.p7s-upstream" ]] || return 1
+[[ -s "$cache_root/etc/apt/preferences.d/99-cubie-a5e-managed-kernel" ]] || return 1
+[[ ! -e "$cache_root/usr/bin/qemu-aarch64-static" ]] || return 1
+
+if [[ -d "$cache_root/lib/modules" ]] &&
+   find "$cache_root/lib/modules" \
+       -mindepth 1 \
+       -maxdepth 1 \
+       -type d \
+       -print -quit |
+       grep -q .; then
+    return 1
+fi
+
+for candidate in \
+    "$cache_root"/boot/vmlinuz-* \
+    "$cache_root"/boot/initrd.img-* \
+    "$cache_root"/boot/config-* \
+    "$cache_root"/boot/System.map-*; do
+    [[ ! -e "$candidate" ]] || return 1
+done
+
+return 0
+}
+
+runtime_cache_is_valid() {
+local created_epoch
+local current_epoch
+local cache_age
+
+[[ "$RUNTIME_CACHE_REBUILD" == "0" ]] || return 1
+[[ -s "$RUNTIME_CACHE_STATE" ]] || return 1
+runtime_cache_tree_is_valid "$RUNTIME_CACHE_ROOTFS" || return 1
+
+grep -Fxq "CACHE_SCHEMA=$RUNTIME_CACHE_SCHEMA" \
+    "$RUNTIME_CACHE_STATE" || return 1
+grep -Fxq "INPUT_FINGERPRINT=$RUNTIME_CACHE_FINGERPRINT" \
+    "$RUNTIME_CACHE_STATE" || return 1
+
+created_epoch="$(
+    sed -n 's/^CREATED_EPOCH=//p' "$RUNTIME_CACHE_STATE" |
+        head -n 1
+)"
+[[ "$created_epoch" =~ ^[0-9]+$ ]] || return 1
+
+if ((RUNTIME_CACHE_MAX_AGE_SECONDS > 0)); then
+    current_epoch="$(date -u +%s)"
+    ((current_epoch >= created_epoch)) || return 1
+    cache_age=$((current_epoch - created_epoch))
+    ((cache_age <= RUNTIME_CACHE_MAX_AGE_SECONDS)) || return 1
+fi
+
+return 0
+}
+
+restore_runtime_cache() {
+runtime_cache_is_valid || return 1
+
+log "Stage 60 runtime rootfs cache hit: $RUNTIME_CACHE_FINGERPRINT"
+log "Restoring the prepared ARM64 runtime without repeating the QEMU APT transaction."
+
+rsync \
+    -aHAXx \
+    --numeric-ids \
+    --delete \
+    --exclude='/dev/*' \
+    --exclude='/proc/*' \
+    --exclude='/run/*' \
+    --exclude='/sys/*' \
+    --exclude='/usr/bin/qemu-aarch64-static' \
+    "$RUNTIME_CACHE_ROOTFS/" \
+    "$ROOT_MNT/"
+
+rm -f -- "$QEMU_TARGET_PATH"
+runtime_cache_tree_is_valid "$ROOT_MNT" ||
+    die "The restored Stage 60 runtime rootfs cache failed validation."
+
+RUNTIME_CACHE_STATUS="hit"
+return 0
+}
+
+publish_runtime_cache() {
+local created_epoch
+
+mkdir -p -- "$BUILD_ROOT/cache"
+RUNTIME_CACHE_TEMP="$(
+    mktemp -d "$BUILD_ROOT/cache/.stage60-runtime-rootfs.XXXXXX"
+)"
+
+install -d -m 0755 -- "$RUNTIME_CACHE_TEMP/rootfs"
+
+log "Publishing the prepared ARM64 runtime rootfs cache."
+rsync \
+    -aHAXx \
+    --numeric-ids \
+    --delete \
+    --exclude='/dev/*' \
+    --exclude='/proc/*' \
+    --exclude='/run/*' \
+    --exclude='/sys/*' \
+    --exclude='/usr/bin/qemu-aarch64-static' \
+    "$ROOT_MNT/" \
+    "$RUNTIME_CACHE_TEMP/rootfs/"
+
+runtime_cache_tree_is_valid "$RUNTIME_CACHE_TEMP/rootfs" ||
+    die "The new Stage 60 runtime rootfs cache failed validation."
+
+created_epoch="$(date -u +%s)"
+{
+    printf 'CACHE_SCHEMA=%s\n' "$RUNTIME_CACHE_SCHEMA"
+    printf 'INPUT_FINGERPRINT=%s\n' "$RUNTIME_CACHE_FINGERPRINT"
+    printf 'CREATED_EPOCH=%s\n' "$created_epoch"
+    printf 'CREATED_UTC=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+} >"$RUNTIME_CACHE_TEMP/state.env"
+chmod 0644 "$RUNTIME_CACHE_TEMP/state.env"
+
+rm -rf -- "$RUNTIME_CACHE_DIR"
+mv -- "$RUNTIME_CACHE_TEMP" "$RUNTIME_CACHE_DIR"
+RUNTIME_CACHE_TEMP=""
+RUNTIME_CACHE_STATUS="miss-published"
+
+log "Stage 60 runtime rootfs cache published: $RUNTIME_CACHE_FINGERPRINT"
+}
+
+validate_target_runtime_package_state() {
+# The backslashes keep Bash from consuming dpkg-query's field placeholders.
+# shellcheck disable=SC2016
+run_arm64_chroot '
+    mapfile -t basic_packages < <(
+        sed -E \
+            -e "/^[[:space:]]*(#|$)/d" \
+            -e "s/[[:space:]]+$//" \
+            /usr/share/cubie-a5e/raspios-lite-compatible-packages.txt
+    )
+
+    required_packages=(
+        "${basic_packages[@]}"
+        cloud-guest-utils
+        device-tree-compiler
+        e2fsprogs
+        gdisk
+        initramfs-tools
+        iw
+        jq
+        kmod
+        librtui
+        network-manager
+        openssl
+        pkexec
+        python3
+        python3-yaml
+        rfkill
+        rsetup
+        tar
+        tzdata
+        u-boot-menu
+        wget
+        whiptail
+        wireless-regdb
+        wpasupplicant
+    )
+
+    declare -A checked_packages=()
+
+    for package in "${required_packages[@]}"; do
+        [[ -z "${checked_packages[$package]+x}" ]] || continue
+        checked_packages[$package]=1
+
+        status="$(
+            dpkg-query -W \
+                -f="\${db:Status-Abbrev}" \
+                "$package" 2>/dev/null
+        )" || {
+            printf "Required runtime package is not registered: %s\n" \
+                "$package" >&2
+            exit 1
+        }
+
+        [[ "$status" == "ii " ]] || {
+            printf "Required runtime package is not fully installed: %s status=<%s>\n" \
+                "$package" \
+                "$status" >&2
+            exit 1
+        }
+    done
+
+    while IFS=$'\t' read -r package status; do
+        [[ "$status" == "ii " ]] || continue
+
+        case "$package" in
+            linux-image-* | linux-dtb-*)
+                printf "Packaged kernel remains in the prepared runtime cache: %s\n" \
+                    "$package" >&2
+                exit 1
+                ;;
+        esac
+    done < <(
+        dpkg-query -W \
+            -f="\${binary:Package}\t\${db:Status-Abbrev}\n" \
+            2>/dev/null
+    )
+
+    test -x /usr/sbin/update-initramfs
+    test -x /usr/bin/unmkinitramfs
+    test -x /usr/bin/rsetup
+    test -d /usr/lib/rsetup
+    test -d /usr/lib/librtui
+    test -s /usr/share/bash-completion/bash_completion
+    test -s /usr/lib/firmware/regulatory.db-upstream
+    test -s /usr/lib/firmware/regulatory.db.p7s-upstream
+'
+}
+
+prepare_cached_target_runtime() {
+RUNTIME_CACHE_FINGERPRINT="$(runtime_cache_input_fingerprint)"
+[[ "$RUNTIME_CACHE_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] ||
+    die "Could not calculate the Stage 60 runtime cache fingerprint."
+
+if [[ "$RUNTIME_CACHE_REBUILD" == "1" ]]; then
+    log "Stage 60 runtime rootfs cache rebuild was explicitly requested."
+elif [[ -e "$RUNTIME_CACHE_DIR" ]] && ! runtime_cache_is_valid; then
+    log "Stage 60 runtime rootfs cache miss: input, age or validation changed."
+fi
+
+if restore_runtime_cache; then
+    mount_chroot_filesystems
+    install_qemu_for_chroot
+    install_kernel_apt_guard
+    validate_target_runtime_package_state
+    return 0
+fi
+
+log "Stage 60 runtime rootfs cache miss: $RUNTIME_CACHE_FINGERPRINT"
+
+mount_chroot_filesystems
+install_qemu_for_chroot
+install_kernel_apt_guard
+purge_packaged_kernels
+remove_existing_kernel_payloads
+ensure_target_runtime_packages
+ensure_initramfs_tools
+validate_target_runtime_package_state
+clean_target_apt_cache
+publish_runtime_cache
 }
 
 mount_chroot_filesystems() {
@@ -1787,6 +2174,9 @@ printf 'rsetup and librtui installed from packages: yes\n'
 printf 'rsetup chroot source-chain smoke test: PASS\n'
 printf 'Raspberry Pi OS Lite compatible base utilities installed: yes\n'
 printf 'Basic package manifest: %s\n' "$BASIC_PACKAGES_TARGET"
+printf 'Stage 60 runtime rootfs cache status: %s\n' "$RUNTIME_CACHE_STATUS"
+printf 'Stage 60 runtime rootfs cache fingerprint: %s\n' "$RUNTIME_CACHE_FINGERPRINT"
+printf 'Stage 60 runtime rootfs cache max age seconds: %s\n' "$RUNTIME_CACHE_MAX_AGE_SECONDS"
 printf 'Automatic root filesystem expansion installed: yes\n'
 printf 'Root filesystem expansion service: cubie-a5e-grow-rootfs.service\n'
 printf 'Root filesystem expansion marker: %s\n' "$ROOT_GROW_MARKER"
@@ -1809,11 +2199,12 @@ printf 'Managed Cubie A5E entry default: yes\n'
 }
 
 main() {
-log "Stage 60 revision: rootfs-autogrow-cache-clean-20260817"
+log "Stage 60 revision: guarded-runtime-rootfs-cache-20260818"
 require_command awk
 require_command blkid
 require_command chroot
 require_command cmp
+require_command date
 require_command depmod
 require_command diff
 require_command find
@@ -1832,6 +2223,8 @@ require_command qemu-aarch64-static
 require_command readlink
 require_command rsync
 require_command sed
+require_command sha256sum
+require_command sort
 require_command strings
 require_command sync
 require_command umount
@@ -1864,14 +2257,12 @@ UPDATE_PUBLIC_KEY="$(<"$UPDATE_PUBLIC_KEY_FILE")"
     die "Update version is invalid: $UPDATE_VERSION"
 require_nonempty_file "$UPDATE_PUBLIC_KEY"
 
+validate_runtime_cache_settings
 validate_input_manifests
 load_target_layout
 mount_target_filesystems
 
-mount_chroot_filesystems
-install_qemu_for_chroot
-install_kernel_apt_guard
-purge_packaged_kernels
+prepare_cached_target_runtime
 remove_existing_kernel_payloads
 
 install_kernel_modules
@@ -1885,11 +2276,9 @@ generate_module_metadata
 validate_single_wifi_loader
 validate_installed_modules
 
-ensure_target_runtime_packages
 install_root_filesystem_expander
 install_initbox_account_and_login_policy
 disable_inapplicable_efi_automount
-ensure_initramfs_tools
 create_initramfs
 validate_initramfs_regulatory_database
 copy_boot_payload
