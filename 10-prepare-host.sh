@@ -20,6 +20,10 @@ export STAGE_NAME="PREPARE"
 : "${CROSS_COMPILE:?CROSS_COMPILE is not set}"
 : "${BUILD_MODE:=image}"
 : "${KERNEL_LOCALVERSION:?KERNEL_LOCALVERSION is not set}"
+: "${KERNEL_INPUT_FINGERPRINT:?KERNEL_INPUT_FINGERPRINT is not set}"
+: "${AIC_INPUT_FINGERPRINT:?AIC_INPUT_FINGERPRINT is not set}"
+: "${KERNEL_REBUILD:=0}"
+: "${AIC_REBUILD:=0}"
 
 readonly LINUX_REPOSITORY="${LINUX_REPOSITORY:-https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git}"
 readonly LINUX_REF="${LINUX_REF:-v6.16}"
@@ -40,6 +44,13 @@ readonly OLD_KERNEL_DIR="$BUILD_ROOT/linux"
 readonly EXPECTED_AIC_REPO="$BUILD_ROOT/aic8800-radxa"
 readonly EXPECTED_DOWNLOAD_DIR="$BUILD_ROOT/downloads"
 readonly EXPECTED_BASE_IMAGE_BUILDER="$SCRIPT_DIR/base/build-debian13-donor-image.sh"
+readonly CACHE_DIR="$BUILD_ROOT/cache"
+readonly KERNEL_CACHE_STATE="$CACHE_DIR/kernel-build.env"
+readonly AIC_CACHE_STATE="$CACHE_DIR/aic8800-build.env"
+
+KERNEL_CACHE_REUSED=0
+KERNEL_TREE_REUSED=0
+AIC_CACHE_REUSED=0
 
 if [[ -n "${LOG_DIR:-}" ]]; then
     mkdir -p -- "$LOG_DIR"
@@ -57,6 +68,42 @@ require_nonempty_file() {
 
     [[ -s "$path" ]] ||
         die "Required file is missing or empty: $path"
+}
+
+cache_value() {
+    local cache_file="$1"
+    local key="$2"
+
+    awk -F= -v wanted="$key" '
+        $1 == wanted {
+            sub(/^[^=]*=/, "")
+            print
+            exit
+        }
+    ' "$cache_file" 2>/dev/null
+}
+
+file_matches_cache_hash() {
+    local cache_file="$1"
+    local key="$2"
+    local path="$3"
+    local expected_hash
+    local actual_hash
+
+    [[ -s "$path" ]] || return 1
+    expected_hash="$(cache_value "$cache_file" "$key")"
+    [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
+    actual_hash="$(sha256sum -- "$path" | awk '{print $1}')"
+    [[ "$actual_hash" == "$expected_hash" ]]
+}
+
+origin_matches() {
+    local actual="$1"
+    local expected="$2"
+
+    [[ "$actual" == "$expected" ||
+       "$actual" == "${expected%.git}" ||
+       "${actual%.git}" == "${expected%.git}" ]]
 }
 
 validate_paths() {
@@ -184,6 +231,7 @@ validate_host_commands() {
         flock
         git
         grep
+        head
         lsblk
         make
         mount
@@ -199,6 +247,7 @@ validate_host_commands() {
         readelf
         rsync
         sed
+        sha256sum
         sha512sum
         strings
         sync
@@ -263,17 +312,216 @@ download_stock_image() {
     log "Verified donor image: $STOCK_IMG_XZ"
 }
 
+validate_kernel_cache() {
+    local actual_kernel_release
+    local cached_kernel_release
+    local tag_commit
+
+    [[ "$KERNEL_REBUILD" == "0" ]] || return 1
+    [[ -s "$KERNEL_CACHE_STATE" ]] || return 1
+    [[ "$(cache_value "$KERNEL_CACHE_STATE" cache_format)" == "1" ]] || return 1
+    [[ "$(cache_value "$KERNEL_CACHE_STATE" fingerprint)" == "$KERNEL_INPUT_FINGERPRINT" ]] || return 1
+    [[ -d "$KERNEL_DIR/.git" ]] || return 1
+    [[ -s "$KERNEL_DIR/Makefile" ]] || return 1
+    [[ -s "$KERNEL_DIR/.config" ]] || return 1
+    [[ -s "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" ]] || return 1
+
+    tag_commit="$(git -C "$KERNEL_DIR" rev-parse "$LINUX_REF^{commit}" 2>/dev/null || true)"
+    [[ "$tag_commit" == "$LINUX_EXPECTED_COMMIT" ]] || return 1
+
+    git -C "$KERNEL_DIR" merge-base --is-ancestor \
+        "$LINUX_EXPECTED_COMMIT" HEAD 2>/dev/null || return 1
+
+    grep -Fxq "CONFIG_LOCALVERSION=\"$KERNEL_LOCALVERSION\"" \
+        "$KERNEL_DIR/.config" || return 1
+    grep -Fxq '# CONFIG_LOCALVERSION_AUTO is not set' \
+        "$KERNEL_DIR/.config" || return 1
+
+    cached_kernel_release="$(cache_value "$KERNEL_CACHE_STATE" kernel_release)"
+    actual_kernel_release="$(
+        make -s -C "$KERNEL_DIR" \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            kernelrelease 2>/dev/null || true
+    )"
+
+    [[ -n "$cached_kernel_release" &&
+       "$actual_kernel_release" == "$cached_kernel_release" ]] || return 1
+    [[ "$(cache_value "$KERNEL_CACHE_STATE" linux_commit)" == \
+       "$(git -C "$KERNEL_DIR" rev-parse HEAD 2>/dev/null || true)" ]] || return 1
+
+    file_matches_cache_hash \
+        "$KERNEL_CACHE_STATE" image_sha256 \
+        "$KERNEL_DIR/arch/arm64/boot/Image" || return 1
+    file_matches_cache_hash \
+        "$KERNEL_CACHE_STATE" board_dtb_sha256 \
+        "$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dtb" || return 1
+    file_matches_cache_hash \
+        "$KERNEL_CACHE_STATE" config_sha256 \
+        "$KERNEL_DIR/.config" || return 1
+    file_matches_cache_hash \
+        "$KERNEL_CACHE_STATE" module_symvers_sha256 \
+        "$KERNEL_DIR/Module.symvers" || return 1
+    file_matches_cache_hash \
+        "$KERNEL_CACHE_STATE" vmlinux_sha256 \
+        "$KERNEL_DIR/vmlinux" || return 1
+
+    return 0
+}
+
+validate_legacy_kernel_tree() {
+    local tag_commit
+
+    [[ "$KERNEL_REBUILD" == "0" ]] || return 1
+    [[ ! -e "$KERNEL_CACHE_STATE" ]] || return 1
+    [[ -d "$KERNEL_DIR/.git" ]] || return 1
+    [[ ! -f "$KERNEL_DIR/.git/CHERRY_PICK_HEAD" ]] || return 1
+    [[ ! -f "$KERNEL_DIR/.git/MERGE_HEAD" ]] || return 1
+    [[ ! -d "$KERNEL_DIR/.git/rebase-merge" ]] || return 1
+    [[ ! -d "$KERNEL_DIR/.git/rebase-apply" ]] || return 1
+    [[ -s "$KERNEL_DIR/.config" ]] || return 1
+    [[ -s "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" ]] || return 1
+    grep -Fxq 'status=complete' \
+        "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" || return 1
+
+    tag_commit="$(git -C "$KERNEL_DIR" rev-parse "$LINUX_REF^{commit}" 2>/dev/null || true)"
+    [[ "$tag_commit" == "$LINUX_EXPECTED_COMMIT" ]] || return 1
+    git -C "$KERNEL_DIR" merge-base --is-ancestor \
+        "$LINUX_EXPECTED_COMMIT" HEAD 2>/dev/null || return 1
+
+    [[ -s "$KERNEL_DIR/arch/arm64/boot/Image" ]] || return 1
+    [[ -s "$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dtb" ]] || return 1
+    [[ -s "$KERNEL_DIR/Module.symvers" ]] || return 1
+    [[ -s "$KERNEL_DIR/vmlinux" ]] || return 1
+
+    make -s -C "$KERNEL_DIR" \
+        ARCH=arm64 \
+        CROSS_COMPILE="$CROSS_COMPILE" \
+        kernelrelease >/dev/null 2>&1 || return 1
+
+    return 0
+}
+
+module_vermagic() {
+    local module_path="$1"
+
+    strings "$module_path" |
+        sed -n 's/^vermagic=//p' |
+        head -n 1
+}
+
+validate_aic_cache() {
+    local actual_kernel_release
+    local bsp_module="$AIC_REPO/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic8800_bsp.ko"
+    local fdrv_module="$AIC_REPO/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/aic8800_fdrv.ko"
+
+    [[ "$KERNEL_REBUILD" == "0" && "$AIC_REBUILD" == "0" ]] || return 1
+    [[ -s "$AIC_CACHE_STATE" ]] || return 1
+    [[ "$(cache_value "$AIC_CACHE_STATE" cache_format)" == "1" ]] || return 1
+    [[ "$(cache_value "$AIC_CACHE_STATE" fingerprint)" == "$AIC_INPUT_FINGERPRINT" ]] || return 1
+    [[ "$(git -C "$AIC_REPO" rev-parse HEAD 2>/dev/null || true)" == "$AIC_EXPECTED_COMMIT" ]] || return 1
+
+    actual_kernel_release="$(
+        make -s -C "$KERNEL_DIR" \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            kernelrelease 2>/dev/null || true
+    )"
+
+    [[ -n "$actual_kernel_release" ]] || return 1
+    [[ "$(cache_value "$AIC_CACHE_STATE" kernel_release)" == "$actual_kernel_release" ]] || return 1
+
+    file_matches_cache_hash \
+        "$AIC_CACHE_STATE" bsp_module_sha256 "$bsp_module" || return 1
+    file_matches_cache_hash \
+        "$AIC_CACHE_STATE" fdrv_module_sha256 "$fdrv_module" || return 1
+    file_matches_cache_hash \
+        "$AIC_CACHE_STATE" bsp_symvers_sha256 \
+        "$AIC_REPO/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/Module.symvers" || return 1
+    file_matches_cache_hash \
+        "$AIC_CACHE_STATE" bsp_command_sha256 \
+        "$AIC_REPO/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/.aicsdio.o.cmd" || return 1
+
+    case "$(module_vermagic "$bsp_module")" in
+        "$actual_kernel_release"*) ;;
+        *) return 1 ;;
+    esac
+
+    case "$(module_vermagic "$fdrv_module")" in
+        "$actual_kernel_release"*) ;;
+        *) return 1 ;;
+    esac
+
+    return 0
+}
+
 prepare_kernel_source() {
     local actual_ref
     local kernel_commit
     local kernel_status
-
-    log "Recreating clean Linux $LINUX_REF source tree."
+    local remote_url
 
     [[ "$KERNEL_DIR" == "$EXPECTED_KERNEL_DIR" ]] ||
         die "Refusing to remove unexpected kernel directory: $KERNEL_DIR"
 
-    rm -rf -- "$KERNEL_DIR"
+    if [[ -e "$KERNEL_DIR" && ! -d "$KERNEL_DIR/.git" ]]; then
+        die "KERNEL_DIR exists but is not a Git repository: $KERNEL_DIR"
+    fi
+
+    if [[ "$KERNEL_REBUILD" == "1" ]]; then
+        rm -f -- "$KERNEL_CACHE_STATE" "$AIC_CACHE_STATE"
+
+        if [[ -d "$KERNEL_DIR/.git" ]]; then
+            log "KERNEL_REBUILD=1; discarding the validated kernel cache."
+            rm -rf -- "$KERNEL_DIR"
+        fi
+    fi
+
+    if [[ -d "$KERNEL_DIR/.git" ]]; then
+        remote_url="$(git -C "$KERNEL_DIR" remote get-url origin)"
+        origin_matches "$remote_url" "$LINUX_REPOSITORY" ||
+            die "Unexpected Linux origin: $remote_url"
+
+        log "Refreshing the declared Linux tag and pinned upstream history."
+        run git -C "$KERNEL_DIR" fetch \
+            --force \
+            origin \
+            "refs/tags/$LINUX_REF:refs/tags/$LINUX_REF"
+
+        run git -C "$KERNEL_DIR" fetch \
+            --no-tags \
+            --shallow-since="$UPSTREAM_SINCE" \
+            origin \
+            master:refs/remotes/origin/master
+
+        kernel_commit="$(git -C "$KERNEL_DIR" rev-parse "$LINUX_REF^{commit}")"
+        [[ "$kernel_commit" == "$LINUX_EXPECTED_COMMIT" ]] ||
+            die "Kernel tag moved: expected $LINUX_EXPECTED_COMMIT, found $kernel_commit"
+
+        if validate_kernel_cache; then
+            KERNEL_CACHE_REUSED=1
+            KERNEL_TREE_REUSED=1
+            log "Reusing validated kernel tree and compiled outputs."
+            log "Kernel cache fingerprint: $KERNEL_INPUT_FINGERPRINT"
+            return 0
+        fi
+
+        if validate_legacy_kernel_tree; then
+            KERNEL_CACHE_REUSED=0
+            KERNEL_TREE_REUSED=1
+            rm -f -- "$AIC_CACHE_STATE"
+            log "Adopting the completed pre-cache kernel tree for one incremental migration build."
+            log "Stage 30 will validate and publish the first guarded cache state."
+            return 0
+        fi
+
+        warn "Kernel cache is absent, stale, forced, or failed validation."
+        warn "Recreating the kernel tree from the declared pin."
+        rm -rf -- "$KERNEL_DIR"
+        rm -f -- "$KERNEL_CACHE_STATE" "$AIC_CACHE_STATE"
+    fi
+
+    log "Creating clean Linux $LINUX_REF source tree."
 
     run git clone \
         --depth 1 \
@@ -312,11 +560,31 @@ prepare_kernel_source() {
         die "Fresh kernel tree is unexpectedly dirty."
     fi
 
+    KERNEL_CACHE_REUSED=0
+    KERNEL_TREE_REUSED=0
     return 0
 }
 
 prepare_kernel_config() {
-    if [[ -n "$KERNEL_CONFIG_SOURCE" ]]; then
+    if [[ "$KERNEL_CACHE_REUSED" == "1" ]]; then
+        require_nonempty_file "$KERNEL_DIR/.config"
+        grep -Fxq "CONFIG_LOCALVERSION=\"$KERNEL_LOCALVERSION\"" "$KERNEL_DIR/.config" ||
+            die "Cached kernel LOCALVERSION does not match $KERNEL_LOCALVERSION."
+        grep -Fxq '# CONFIG_LOCALVERSION_AUTO is not set' "$KERNEL_DIR/.config" ||
+            die "Cached kernel unexpectedly enables CONFIG_LOCALVERSION_AUTO."
+        log "Keeping the validated cached kernel configuration and build objects."
+        return 0
+    fi
+
+    if [[ "$KERNEL_TREE_REUSED" == "1" ]]; then
+        if [[ -n "$KERNEL_CONFIG_SOURCE" ]]; then
+            require_nonempty_file "$KERNEL_CONFIG_SOURCE"
+            log "Applying explicitly selected kernel configuration to the reusable tree: $KERNEL_CONFIG_SOURCE"
+            cp -a -- "$KERNEL_CONFIG_SOURCE" "$KERNEL_DIR/.config"
+        else
+            log "Keeping the existing validated kernel configuration for incremental cache migration."
+        fi
+    elif [[ -n "$KERNEL_CONFIG_SOURCE" ]]; then
         require_nonempty_file "$KERNEL_CONFIG_SOURCE"
 
         log "Using explicitly selected kernel configuration: $KERNEL_CONFIG_SOURCE"
@@ -372,9 +640,7 @@ prepare_aic_source() {
 
     remote_url="$(git -C "$AIC_REPO" remote get-url origin)"
 
-    [[ "$remote_url" == "$AIC_REPOSITORY" ||
-       "$remote_url" == "${AIC_REPOSITORY%.git}" ||
-       "${remote_url%.git}" == "${AIC_REPOSITORY%.git}" ]] ||
+    origin_matches "$remote_url" "$AIC_REPOSITORY" ||
         die "Unexpected AIC8800 origin: $remote_url"
 
     run git -C "$AIC_REPO" fetch \
@@ -414,13 +680,30 @@ prepare_aic_source() {
         die "Requested AIC_REF does not exist: $requested_ref"
     fi
 
-    run git -C "$AIC_REPO" reset --hard "$selected_ref"
-    run git -C "$AIC_REPO" clean -ffdx
-
-    aic_commit="$(git -C "$AIC_REPO" rev-parse HEAD)"
+    aic_commit="$(git -C "$AIC_REPO" rev-parse "$selected_ref^{commit}")"
 
     [[ "$aic_commit" == "$AIC_EXPECTED_COMMIT" ]] ||
         die "AIC8800 ref moved: expected $AIC_EXPECTED_COMMIT, found $aic_commit"
+
+    if [[ "$AIC_REBUILD" == "1" ]]; then
+        log "AIC_REBUILD=1; discarding the validated AIC8800 cache."
+        rm -f -- "$AIC_CACHE_STATE"
+    fi
+
+    if validate_aic_cache; then
+        AIC_CACHE_REUSED=1
+        log "Reusing validated AIC8800 source state and compiled modules."
+        log "AIC8800 cache fingerprint: $AIC_INPUT_FINGERPRINT"
+        return 0
+    fi
+
+    warn "AIC8800 cache is absent, stale, forced, or failed validation."
+    log "Resetting AIC8800 source to the declared pin."
+    run git -C "$AIC_REPO" reset --hard "$selected_ref"
+    run git -C "$AIC_REPO" clean -ffdx
+    rm -f -- "$AIC_CACHE_STATE"
+
+    aic_commit="$(git -C "$AIC_REPO" rev-parse HEAD)"
 
     aic_status="$(git -C "$AIC_REPO" status --porcelain)"
 
@@ -428,6 +711,8 @@ prepare_aic_source() {
         printf '%s\n' "$aic_status" >&2
         die "AIC8800 source tree remains dirty after reset."
     fi
+
+    AIC_CACHE_REUSED=0
 
     need_dir "$AIC_REPO/src/SDIO/driver_fw/driver/aic8800"
     need_dir "$AIC_REPO/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp"
@@ -473,25 +758,39 @@ write_source_report() {
     {
         printf 'Kernel repository: %s\n' "$LINUX_REPOSITORY"
         printf 'Kernel requested ref: %s\n' "$LINUX_REF"
-        printf 'Kernel exact tag: %s\n' \
-            "$(git -C "$KERNEL_DIR" describe --tags --exact-match HEAD)"
-        printf 'Kernel commit: %s\n' \
+        printf 'Kernel declared tag commit: %s\n' \
+            "$(git -C "$KERNEL_DIR" rev-parse "$LINUX_REF^{commit}")"
+        printf 'Kernel working-tree HEAD: %s\n' \
             "$(git -C "$KERNEL_DIR" rev-parse HEAD)"
         printf 'Kernel expected commit: %s\n' "$LINUX_EXPECTED_COMMIT"
-        printf 'Kernel status:\n'
-        git -C "$KERNEL_DIR" status --short
+        printf 'Kernel input fingerprint: %s\n' "$KERNEL_INPUT_FINGERPRINT"
+        printf 'Kernel validated cache reused: %s\n' "$KERNEL_CACHE_REUSED"
+        printf 'Kernel tree/build objects reused: %s\n' "$KERNEL_TREE_REUSED"
+
+        if [[ "$KERNEL_TREE_REUSED" == "0" ]]; then
+            printf 'Kernel status:\n'
+            git -C "$KERNEL_DIR" status --short
+        else
+            printf 'Kernel status: validated patched source and build objects retained\n'
+        fi
 
         printf '\nAIC repository: %s\n' "$AIC_REPOSITORY"
         printf 'AIC requested ref override: %s\n' "${AIC_REF:-origin HEAD}"
         printf 'AIC commit: %s\n' \
             "$(git -C "$AIC_REPO" rev-parse HEAD)"
         printf 'AIC expected commit: %s\n' "$AIC_EXPECTED_COMMIT"
+        printf 'AIC input fingerprint: %s\n' "$AIC_INPUT_FINGERPRINT"
+        printf 'AIC validated cache reused: %s\n' "$AIC_CACHE_REUSED"
         if [[ "$BUILD_MODE" == "image" ]]; then
             printf '\nRadxa donor URL: %s\n' "$STOCK_IMAGE_URL"
             printf 'Radxa donor SHA-512: %s\n' "$STOCK_IMAGE_SHA512"
         fi
-        printf 'AIC status:\n'
-        git -C "$AIC_REPO" status --short
+        if [[ "$AIC_CACHE_REUSED" == "0" ]]; then
+            printf 'AIC status:\n'
+            git -C "$AIC_REPO" status --short
+        else
+            printf 'AIC status: validated patched source and module outputs retained\n'
+        fi
     } >"$SOURCE_REPORT"
 }
 
@@ -505,10 +804,15 @@ write_prepare_report() {
         printf 'Kernel directory: %s\n' "$KERNEL_DIR"
         printf 'Kernel ref: %s\n' "$LINUX_REF"
         printf 'Kernel local version: %s\n' "$KERNEL_LOCALVERSION"
+        printf 'Kernel input fingerprint: %s\n' "$KERNEL_INPUT_FINGERPRINT"
+        printf 'Kernel validated cache reused: %s\n' "$KERNEL_CACHE_REUSED"
+        printf 'Kernel tree/build objects reused: %s\n' "$KERNEL_TREE_REUSED"
         printf 'Kernel config source: %s\n' \
             "${KERNEL_CONFIG_SOURCE:-arm64 defconfig}"
         printf 'AIC repository: %s\n' "$AIC_REPO"
         printf 'AIC ref: %s\n' "$AIC_REF"
+        printf 'AIC input fingerprint: %s\n' "$AIC_INPUT_FINGERPRINT"
+        printf 'AIC validated cache reused: %s\n' "$AIC_CACHE_REUSED"
         printf 'AIC driver platform path: generic Linux SDIO\n'
         printf 'External RFKill/MMC rescan compatibility required: no\n'
         if [[ "$BUILD_MODE" == "image" ]]; then
@@ -525,7 +829,17 @@ main() {
     [[ "$(id -u)" -eq 0 ]] ||
         die "Run this stage as root."
 
-    mkdir -p -- "$BUILD_ROOT"
+    case "$KERNEL_REBUILD" in
+        0 | 1) ;;
+        *) die "KERNEL_REBUILD must be 0 or 1, got: $KERNEL_REBUILD" ;;
+    esac
+
+    case "$AIC_REBUILD" in
+        0 | 1) ;;
+        *) die "AIC_REBUILD must be 0 or 1, got: $AIC_REBUILD" ;;
+    esac
+
+    mkdir -p -- "$BUILD_ROOT" "$CACHE_DIR"
 
     validate_paths
     install_required_packages
