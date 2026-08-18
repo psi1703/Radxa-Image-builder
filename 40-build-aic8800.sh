@@ -16,6 +16,9 @@ export STAGE_NAME="AIC8800"
 : "${AIC_REPO:?AIC_REPO is not set}"
 : "${CROSS_COMPILE:?CROSS_COMPILE is not set}"
 : "${JOBS:?JOBS is not set}"
+: "${AIC_INPUT_FINGERPRINT:?AIC_INPUT_FINGERPRINT is not set}"
+: "${KERNEL_REBUILD:=0}"
+: "${AIC_REBUILD:=0}"
 
 readonly AIC_DRIVER="$AIC_REPO/src/SDIO/driver_fw/driver/aic8800"
 readonly AIC_BSP_DIR="$AIC_DRIVER/aic8800_bsp"
@@ -28,8 +31,12 @@ readonly AIC_BSP_MODULE="$AIC_BSP_DIR/aic8800_bsp.ko"
 readonly AIC_FDRV_MODULE="$AIC_FDRV_DIR/aic8800_fdrv.ko"
 
 readonly AIC_BSP_SYMVERS="$AIC_BSP_DIR/Module.symvers"
+readonly AIC_BSP_COMMAND="$AIC_BSP_DIR/.aicsdio.o.cmd"
+readonly CACHE_DIR="$BUILD_ROOT/cache"
+readonly AIC_CACHE_STATE="$CACHE_DIR/aic8800-build.env"
 
 KERNEL_RELEASE=""
+AIC_CACHE_REUSED=0
 
 if [[ -n "${LOG_DIR:-}" ]]; then
 mkdir -p -- "$LOG_DIR"
@@ -77,6 +84,69 @@ strings "$module_path" |
     sed -n 's/^vermagic=//p' |
     head -n 1
 
+}
+
+cache_value() {
+local key="$1"
+
+awk -F= -v wanted="$key" '
+    $1 == wanted {
+        sub(/^[^=]*=/, "")
+        print
+        exit
+    }
+' "$AIC_CACHE_STATE" 2>/dev/null
+}
+
+file_matches_cache_hash() {
+local key="$1"
+local path="$2"
+local expected_hash
+local actual_hash
+
+[[ -s "$path" ]] || return 1
+expected_hash="$(cache_value "$key")"
+[[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
+actual_hash="$(sha256sum -- "$path" | awk '{print $1}')"
+[[ "$actual_hash" == "$expected_hash" ]]
+}
+
+validated_aic_cache_available() {
+[[ "$KERNEL_REBUILD" == "0" && "$AIC_REBUILD" == "0" ]] || return 1
+[[ -s "$AIC_CACHE_STATE" ]] || return 1
+[[ "$(cache_value cache_format)" == "1" ]] || return 1
+[[ "$(cache_value fingerprint)" == "$AIC_INPUT_FINGERPRINT" ]] || return 1
+[[ "$(cache_value kernel_release)" == "$KERNEL_RELEASE" ]] || return 1
+[[ "$(cache_value aic_commit)" == \
+   "$(git -C "$AIC_REPO" rev-parse HEAD 2>/dev/null || true)" ]] || return 1
+
+file_matches_cache_hash bsp_module_sha256 "$AIC_BSP_MODULE" || return 1
+file_matches_cache_hash fdrv_module_sha256 "$AIC_FDRV_MODULE" || return 1
+file_matches_cache_hash bsp_symvers_sha256 "$AIC_BSP_SYMVERS" || return 1
+file_matches_cache_hash bsp_command_sha256 "$AIC_BSP_COMMAND" || return 1
+
+return 0
+}
+
+write_aic_cache_state() {
+local temporary_state
+
+mkdir -p -- "$CACHE_DIR"
+temporary_state="$(mktemp "$CACHE_DIR/.aic8800-build.XXXXXX")"
+
+{
+    printf 'cache_format=1\n'
+    printf 'fingerprint=%s\n' "$AIC_INPUT_FINGERPRINT"
+    printf 'kernel_release=%s\n' "$KERNEL_RELEASE"
+    printf 'aic_commit=%s\n' "$(git -C "$AIC_REPO" rev-parse HEAD)"
+    printf 'bsp_module_sha256=%s\n' "$(sha256sum -- "$AIC_BSP_MODULE" | awk '{print $1}')"
+    printf 'fdrv_module_sha256=%s\n' "$(sha256sum -- "$AIC_FDRV_MODULE" | awk '{print $1}')"
+    printf 'bsp_symvers_sha256=%s\n' "$(sha256sum -- "$AIC_BSP_SYMVERS" | awk '{print $1}')"
+    printf 'bsp_command_sha256=%s\n' "$(sha256sum -- "$AIC_BSP_COMMAND" | awk '{print $1}')"
+} >"$temporary_state"
+
+chmod 0644 "$temporary_state"
+mv -f -- "$temporary_state" "$AIC_CACHE_STATE"
 }
 
 validate_module_release() {
@@ -355,6 +425,8 @@ write_validation_reports() {
 printf 'AIC8800 build report\n'
 printf '====================\n'
 printf 'Kernel release: %s\n' "$KERNEL_RELEASE"
+printf 'AIC input fingerprint: %s\n' "$AIC_INPUT_FINGERPRINT"
+printf 'Validated AIC cache reused: %s\n' "$AIC_CACHE_REUSED"
 printf 'Kernel directory: %s\n' "$KERNEL_DIR"
 printf 'AIC repository: %s\n' "$AIC_REPO"
 printf 'AIC driver directory: %s\n' "$AIC_DRIVER"
@@ -403,14 +475,28 @@ printf '%s\n' \
 main() {
 require_command make
 require_command grep
+require_command chmod
 require_command sed
 require_command find
 require_command strings
+require_command mktemp
+require_command mv
 require_command nm
+require_command sha256sum
 require_command sort
 require_command head
 require_command git
 require_command awk
+
+case "$KERNEL_REBUILD" in
+    0 | 1) ;;
+    *) die "KERNEL_REBUILD must be 0 or 1, got: $KERNEL_REBUILD" ;;
+esac
+
+case "$AIC_REBUILD" in
+    0 | 1) ;;
+    *) die "AIC_REBUILD must be 0 or 1, got: $AIC_REBUILD" ;;
+esac
 
 need_dir "$KERNEL_DIR"
 need_dir "$AIC_REPO"
@@ -440,6 +526,29 @@ log "AIC8800 automated Wi-Fi build starting with generic Linux SDIO binding."
 log "Kernel release: $KERNEL_RELEASE"
 log "Bluetooth module will not be built in this stage."
 
+if validated_aic_cache_available; then
+    AIC_CACHE_REUSED=1
+    log "Reusing validated AIC8800 BSP and Wi-Fi modules."
+    log "AIC8800 cache fingerprint: $AIC_INPUT_FINGERPRINT"
+
+    validate_module_release "$AIC_BSP_MODULE"
+    validate_module_release "$AIC_FDRV_MODULE"
+    validate_aic_compiler_flags
+    validate_aic_imports
+    validate_no_bluetooth_module
+    write_module_manifests
+    write_validation_reports
+
+    log "AIC8800 cache validation passed for $KERNEL_RELEASE."
+    log "BSP module: $AIC_BSP_MODULE"
+    log "Wi-Fi driver module: $AIC_FDRV_MODULE"
+    return 0
+fi
+
+AIC_CACHE_REUSED=0
+rm -f -- "$AIC_CACHE_STATE"
+log "AIC8800 cache miss; rebuilding the external modules."
+
 reset_aic_patch_state
 normalize_quilt_patch_line_endings
 validate_usb_patch_inputs
@@ -455,8 +564,10 @@ validate_no_bluetooth_module
 
 write_module_manifests
 write_validation_reports
+write_aic_cache_state
 
 log "AIC8800 Wi-Fi module build passed for $KERNEL_RELEASE."
+log "AIC8800 cache state: $AIC_CACHE_STATE"
 log "BSP module: $AIC_BSP_MODULE"
 log "Wi-Fi driver module: $AIC_FDRV_MODULE"
 log "Symbol report: $AIC_SYMBOL_REPORT"
