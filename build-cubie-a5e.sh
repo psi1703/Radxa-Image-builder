@@ -104,6 +104,7 @@ readonly LOCK_FILE
 export BUILD_ROOT DOWNLOAD_DIR INPUT_DIR KERNEL_DIR AIC_REPO ROOTFS_DIR
 export BASE_IMAGE_BUILDER STOCK_IMG_XZ
 export LINUX_REPOSITORY LINUX_REF LINUX_EXPECTED_COMMIT
+export BSP_REPOSITORY BSP_REF BSP_EXPECTED_COMMIT
 export AIC_REPOSITORY AIC_REF AIC_EXPECTED_COMMIT
 export STOCK_IMAGE_URL STOCK_IMAGE_SHA512
 export TARGET_DEVICE
@@ -121,6 +122,7 @@ fi
 
 stages+=(
     "20-backport-gmac1.sh"
+    "22-backport-pcie.sh"
     "25-apply-hardware-dts.sh"
     "30-build-kernel.sh"
     "40-build-aic8800.sh"
@@ -190,6 +192,9 @@ capture_environment() {
         printf 'Download directory: %s\n' "$DOWNLOAD_DIR"
         printf 'Input directory: %s\n' "$INPUT_DIR"
         printf 'Kernel directory: %s\n' "$KERNEL_DIR"
+        printf 'Radxa BSP repository: %s\n' "$BSP_REPOSITORY"
+        printf 'Radxa BSP ref: %s\n' "$BSP_REF"
+        printf 'Radxa BSP commit: %s\n' "$BSP_EXPECTED_COMMIT"
         printf 'AIC repository: %s\n' "$AIC_REPO"
         printf 'Debian rootfs: %s\n' "$ROOTFS_DIR"
         printf 'Base image builder: %s\n' "$BASE_IMAGE_BUILDER"
@@ -594,6 +599,7 @@ compute_build_fingerprints() {
     local kernel_input_files=(
         "$SCRIPT_DIR/10-prepare-host.sh"
         "$SCRIPT_DIR/20-backport-gmac1.sh"
+        "$SCRIPT_DIR/22-backport-pcie.sh"
         "$SCRIPT_DIR/25-apply-hardware-dts.sh"
         "$SCRIPT_DIR/30-build-kernel.sh"
     )
@@ -637,6 +643,9 @@ compute_build_fingerprints() {
         printf 'linux-repository=%s\n' "$LINUX_REPOSITORY"
         printf 'linux-ref=%s\n' "$LINUX_REF"
         printf 'linux-commit=%s\n' "$LINUX_EXPECTED_COMMIT"
+        printf 'bsp-repository=%s\n' "$BSP_REPOSITORY"
+        printf 'bsp-ref=%s\n' "$BSP_REF"
+        printf 'bsp-commit=%s\n' "$BSP_EXPECTED_COMMIT"
         printf 'compiler-path=%s\n' "$compiler_path"
         printf 'compiler-version=%s\n' "$compiler_version"
         printf 'compiler-machine=%s\n' "$("$compiler_command" -dumpmachine)"
