@@ -48,6 +48,9 @@ readonly ROOT_GROW_PROGRAM="/usr/local/sbin/cubie-a5e-grow-rootfs"
 readonly ROOT_GROW_UNIT="/usr/lib/systemd/system/cubie-a5e-grow-rootfs.service"
 readonly ROOT_GROW_WANTS="/etc/systemd/system/multi-user.target.wants/cubie-a5e-grow-rootfs.service"
 readonly ROOT_GROW_MARKER="/var/lib/cubie-a5e/rootfs-expanded"
+readonly PCIE_MODULE_REL="kernel/drivers/pci/controller/sunxi/pcie_sunxi_host.ko"
+readonly PCIE_PHY_MODULE_REL="kernel/drivers/phy/allwinner/phy-sunxi-inno-combophy.ko"
+readonly PCIE_INITRAMFS_STATUS="/var/lib/cubie-a5e/pcie-initramfs.status"
 
 readonly ROOT_MNT="${ROOT_MNT:-$BUILD_ROOT/mnt/one-shot-root}"
 readonly DEFAULT_BOOT_MNT="${BOOT_MNT:-$BUILD_ROOT/mnt/one-shot-boot}"
@@ -559,6 +562,43 @@ diff -u \
 
 mv -f -- "$modules_load_tmp" "$modules_load_file"
 mv -f -- "$modprobe_tmp" "$modprobe_file"
+}
+
+install_nvme_initramfs_policy() {
+local initramfs_modules="$ROOT_MNT/etc/initramfs-tools/modules"
+local initramfs_modules_tmp
+
+require_nonempty_file \
+    "$ROOT_MNT/lib/modules/$KERNEL_RELEASE/$PCIE_PHY_MODULE_REL"
+require_nonempty_file \
+    "$ROOT_MNT/lib/modules/$KERNEL_RELEASE/$PCIE_MODULE_REL"
+
+validate_module_release \
+    "$ROOT_MNT/lib/modules/$KERNEL_RELEASE/$PCIE_PHY_MODULE_REL"
+validate_module_release \
+    "$ROOT_MNT/lib/modules/$KERNEL_RELEASE/$PCIE_MODULE_REL"
+
+install -d -m 0755 -- "$(dirname -- "$initramfs_modules")"
+initramfs_modules_tmp="$(mktemp "$ROOT_MNT/etc/initramfs-tools/.modules.XXXXXX")"
+
+if [[ -f "$initramfs_modules" ]]; then
+    grep -Ev \
+        '^[[:space:]]*(phy-sunxi-inno-combophy|pcie_sunxi_host)([[:space:]]+.*)?$' \
+        "$initramfs_modules" >"$initramfs_modules_tmp" || true
+fi
+
+printf '%s\n' \
+    phy-sunxi-inno-combophy \
+    pcie_sunxi_host \
+    >>"$initramfs_modules_tmp"
+
+chmod 0644 "$initramfs_modules_tmp"
+mv -f -- "$initramfs_modules_tmp" "$initramfs_modules"
+
+[[ "$(grep -Fxc 'phy-sunxi-inno-combophy' "$initramfs_modules")" == "1" ]] ||
+    die "The combo-PHY initramfs module policy is invalid."
+[[ "$(grep -Fxc 'pcie_sunxi_host' "$initramfs_modules")" == "1" ]] ||
+    die "The PCIe host initramfs module policy is invalid."
 }
 
 install_firmware() {
@@ -1970,12 +2010,37 @@ run_arm64_chroot "
             >&2
         exit 1
     }
+
+    find \"\$extract_dir\" \
+        -type f \
+        -name 'phy-sunxi-inno-combophy.ko*' \
+        -print -quit | grep -q . || {
+        printf '%s\n' \
+            'The initramfs does not contain the Allwinner combo-PHY module.' \
+            >&2
+        exit 1
+    }
+
+    find \"\$extract_dir\" \
+        -type f \
+        -name 'pcie_sunxi_host.ko*' \
+        -print -quit | grep -q . || {
+        printf '%s\n' \
+            'The initramfs does not contain the Allwinner PCIe host module.' \
+            >&2
+        exit 1
+    }
 "
 
 install -D -m 0644 /dev/null "$status_file"
 printf '%s\n' \
     'upstream regulatory.db and regulatory.db.p7s: PASS' \
     >"$status_file"
+
+install -D -m 0644 /dev/null "$ROOT_MNT$PCIE_INITRAMFS_STATUS"
+printf '%s\n' \
+    'Allwinner combo-PHY and PCIe host modules: PASS' \
+    >"$ROOT_MNT$PCIE_INITRAMFS_STATUS"
 }
 
 copy_boot_payload() {
@@ -2274,6 +2339,7 @@ install_external_modules
 remove_duplicate_wifi_loader
 remove_obsolete_aic_module_aliases
 install_module_policy
+install_nvme_initramfs_policy
 install_firmware
 generate_module_metadata
 validate_single_wifi_loader

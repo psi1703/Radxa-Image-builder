@@ -53,6 +53,9 @@ readonly RADXA_REPO_HELPER_TARGET="/usr/local/sbin/cubie-a5e-ensure-radxa-repo"
 readonly RADXA_REPO_FILE="/etc/apt/sources.list.d/70-trixie.list"
 readonly RADXA_KEYRING="/usr/share/keyrings/radxa-archive-keyring.gpg"
 readonly REGULATORY_INITRAMFS_STATUS="/var/lib/cubie-a5e/regulatory-initramfs.status"
+readonly PCIE_INITRAMFS_STATUS="/var/lib/cubie-a5e/pcie-initramfs.status"
+readonly PCIE_MODULE_REL="kernel/drivers/pci/controller/sunxi/pcie_sunxi_host.ko"
+readonly PCIE_PHY_MODULE_REL="kernel/drivers/phy/allwinner/phy-sunxi-inno-combophy.ko"
 readonly ROOT_GROW_PROGRAM="/usr/local/sbin/cubie-a5e-grow-rootfs"
 readonly ROOT_GROW_UNIT="/usr/lib/systemd/system/cubie-a5e-grow-rootfs.service"
 readonly ROOT_GROW_WANTS="/etc/systemd/system/multi-user.target.wants/cubie-a5e-grow-rootfs.service"
@@ -295,11 +298,11 @@ grep -Fxq 'CONFIG_SUN55I_PCK600=y' "$root_config" ||
 grep -Fxq 'CONFIG_PM_GENERIC_DOMAINS=y' "$root_config" ||
     die "Installed kernel lacks generic power-domain support."
 
-grep -Fxq 'CONFIG_AW_PCIE_RC=y' "$root_config" ||
-    die "Installed kernel does not build the Allwinner PCIe host driver in."
+grep -Fxq 'CONFIG_AW_PCIE_RC=m' "$root_config" ||
+    die "Installed kernel does not build the Allwinner PCIe host driver as a module."
 
-grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=y' "$root_config" ||
-    die "Installed kernel does not build the PCIe combo PHY in."
+grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$root_config" ||
+    die "Installed kernel does not build the PCIe combo PHY as a module."
 
 grep -Fxq 'CONFIG_BLK_DEV_NVME=y' "$root_config" ||
     die "Installed kernel does not build the NVMe host driver in."
@@ -340,6 +343,25 @@ require_nonempty_file "$module_root/modules.alias"
 require_nonempty_file "$module_root/modules.softdep"
 
 : >"$VALIDATION_MODULES"
+
+for module_path in \
+    "$module_root/$PCIE_PHY_MODULE_REL" \
+    "$module_root/$PCIE_MODULE_REL"; do
+    require_nonempty_file "$module_path"
+    module_name="$(basename -- "$module_path")"
+    vermagic="$(module_vermagic "$module_path")"
+
+    case "$vermagic" in
+        "$KERNEL_RELEASE"*)
+            ;;
+        *)
+            die "Module release mismatch: $module_name=$vermagic expected=$KERNEL_RELEASE"
+            ;;
+    esac
+
+    printf '%s\t%s\n' "$module_path" "$vermagic" >> \
+        "$VALIDATION_MODULES"
+done
 
 for module_name in \
     aic8800_bsp.ko \
@@ -384,6 +406,12 @@ grep -q '^updates/aic8800/aic8800_fdrv\.ko:' \
     "$module_root/modules.dep" ||
     die "aic8800_fdrv.ko is absent from modules.dep"
 
+grep -q "^${PCIE_PHY_MODULE_REL}:" "$module_root/modules.dep" ||
+    die "The combo-PHY module is absent from modules.dep."
+
+grep -q "^${PCIE_MODULE_REL}:" "$module_root/modules.dep" ||
+    die "The PCIe host module is absent from modules.dep."
+
 if nm -u "$external_dir/aic8800_bsp.ko" |
     grep -Eq \
         '[[:space:]]U (sunxi_mmc_rescan_card|sunxi_wlan_get_bus_index|sunxi_wlan_set_power|sunxi_wlan_get_oob_irq)$'; then
@@ -410,10 +438,17 @@ installed_module_count="$(
 validate_module_policy() {
 local load_file="$ROOT_MNT/etc/modules-load.d/cubie-a5e-aic8800.conf"
 local softdep_file="$ROOT_MNT/etc/modprobe.d/cubie-a5e-aic8800.conf"
+local initramfs_modules="$ROOT_MNT/etc/initramfs-tools/modules"
 local legacy_pattern
 
 require_nonempty_file "$load_file"
 require_nonempty_file "$softdep_file"
+require_nonempty_file "$initramfs_modules"
+
+[[ "$(grep -Fxc 'phy-sunxi-inno-combophy' "$initramfs_modules")" == "1" ]] ||
+    die "The combo-PHY initramfs module policy is invalid."
+[[ "$(grep -Fxc 'pcie_sunxi_host' "$initramfs_modules")" == "1" ]] ||
+    die "The PCIe host initramfs module policy is invalid."
 
 diff -u \
     <(
@@ -648,6 +683,13 @@ grep -Fxq \
     'upstream regulatory.db and regulatory.db.p7s: PASS' \
     "$ROOT_MNT$REGULATORY_INITRAMFS_STATUS" ||
     die "The initramfs upstream regulatory payload validation did not pass."
+
+require_nonempty_file "$ROOT_MNT$PCIE_INITRAMFS_STATUS"
+
+grep -Fxq \
+    'Allwinner combo-PHY and PCIe host modules: PASS' \
+    "$ROOT_MNT$PCIE_INITRAMFS_STATUS" ||
+    die "The initramfs PCIe module validation did not pass."
 
 for efi_unit in efi.automount efi.mount; do
     [[ -L "$ROOT_MNT/etc/systemd/system/$efi_unit" ]] ||
@@ -1420,6 +1462,9 @@ rm -f -- "$VALIDATION_DTB"
 dtc \
     -I dtb \
     -O dts \
+    -E ranges_format \
+    -E reg_format \
+    -E simple_bus_reg \
     -Wno-unit_address_vs_reg \
     -o "$VALIDATION_DTB" \
     "$target_dtb"
@@ -1550,16 +1595,22 @@ gmac1_power_domain="$(
     max-link-speed)" == "2" ]] ||
     die "Installed DTB does not request PCIe Gen2."
 
+[[ "$(fdtget -t u "$target_dtb" /soc '#address-cells')" == "1" ]] ||
+    die "Installed DTB /soc bus does not use one address cell."
+
+[[ "$(fdtget -t u "$target_dtb" /soc '#size-cells')" == "1" ]] ||
+    die "Installed DTB /soc bus does not use one size cell."
+
 [[ "$(fdtget -t x "$target_dtb" /soc/pcie@4800000 reg)" == \
-   "0 4800000 0 480000" ]] ||
+   "4800000 480000" ]] ||
     die "Installed DTB has the wrong PCIe register range."
 
 [[ "$(fdtget -t x "$target_dtb" /soc/phy@4f00000 reg)" == \
-   "0 4f00000 0 80000 0 4f80000 0 80000" ]] ||
+   "4f00000 80000 4f80000 80000" ]] ||
     die "Installed DTB has the wrong combo-PHY register ranges."
 
 [[ "$(fdtget -t x "$target_dtb" /soc/pcie@4800000 ranges)" == \
-   "800 0 20000000 0 20000000 0 1000000 81000000 0 21000000 0 21000000 0 1000000 82000000 0 22000000 0 22000000 0 e000000" ]] ||
+   "800 0 20000000 20000000 0 1000000 81000000 0 21000000 21000000 0 1000000 82000000 0 22000000 22000000 0 e000000" ]] ||
     die "Installed DTB has the wrong PCIe outbound address windows."
 
 combophy_phandle="$(
@@ -2058,6 +2109,7 @@ printf 'Wireless regulatory signing key built in: yes\n'
 printf 'Inapplicable EFI automount masked: yes\n'
 printf 'Timezone: Asia/Dubai\n'
 printf 'Installed DTB validated: yes\n'
+printf 'PCIe/PHY initramfs modules validated: yes\n'
 printf 'Read-only remount validation: yes\n'
 printf '\nEvidence files:\n'
 printf 'Extlinux: %s\n' "$VALIDATION_EXTLINUX"
@@ -2069,6 +2121,7 @@ printf 'Decompiled DTB: %s\n' "$VALIDATION_DTB"
 main() {
 require_command awk
 require_command bash
+require_command basename
 require_command blkid
 require_command cmp
 require_command df
@@ -2113,7 +2166,7 @@ UPDATE_VERSION="$(tr -d '[:space:]' <"$UPDATE_VERSION_FILE")"
 [[ "$UPDATE_VERSION" =~ ^[A-Za-z0-9._+:-]+$ ]] ||
     die "Update version is invalid: $UPDATE_VERSION"
 
-log "Stage 80 revision: rootfs-autogrow-compact-image-validation-20260817"
+log "Stage 80 revision: pcie-initramfs-and-dtb-structure-v3-20260818"
 log "Beginning clean read-only target validation."
 
 load_target_layout

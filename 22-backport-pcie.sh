@@ -57,12 +57,13 @@ require_nonempty_file() {
 completed_port_available() {
     [[ -s "$PCIE_STAMP" ]] || return 1
     grep -Fxq "bsp_commit=$BSP_EXPECTED_COMMIT" "$PCIE_STAMP" || return 1
-    grep -Fxq 'dt_layout=64-bit-soc-cells-v2' "$PCIE_STAMP" || return 1
+    grep -Fxq 'dt_layout=mainline-soc-one-cell-v3' "$PCIE_STAMP" || return 1
+    grep -Fxq 'driver_mode=initramfs-modules-v3' "$PCIE_STAMP" || return 1
     grep -Fxq 'status=complete' "$PCIE_STAMP" || return 1
     [[ -s "$BOARD_DTB" ]] || return 1
     [[ -s "$KERNEL_DIR/.config" ]] || return 1
-    grep -Fxq 'CONFIG_AW_PCIE_RC=y' "$KERNEL_DIR/.config" || return 1
-    grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=y' "$KERNEL_DIR/.config" || return 1
+    grep -Fxq 'CONFIG_AW_PCIE_RC=m' "$KERNEL_DIR/.config" || return 1
+    grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$KERNEL_DIR/.config" || return 1
     grep -Fxq 'CONFIG_BLK_DEV_NVME=y' "$KERNEL_DIR/.config" || return 1
 
     return 0
@@ -377,7 +378,7 @@ phy_path.write_text(phy, encoding="utf-8")
     """# SPDX-License-Identifier: GPL-2.0-only
 
 config AW_PCIE_RC
-	bool "Allwinner vendor PCIe root complex controller"
+	tristate "Allwinner vendor PCIe root complex controller"
 	depends on ARCH_SUNXI || COMPILE_TEST
 	depends on PCI_MSI
 	select GENERIC_PHY
@@ -432,7 +433,7 @@ if "config PHY_SUNXI_INNO_COMBOPHY" not in phy_kconfig:
         """# Phy drivers for Allwinner platforms
 #
 config PHY_SUNXI_INNO_COMBOPHY
-	bool "Allwinner Innosilicon PCIe/USB3 combo PHY"
+	tristate "Allwinner Innosilicon PCIe/USB3 combo PHY"
 	depends on ARCH_SUNXI || COMPILE_TEST
 	depends on OF
 	select GENERIC_PHY
@@ -591,8 +592,8 @@ soc_block = r'''
 &{/soc} {
 	combophy: phy@4f00000 {
 		compatible = "allwinner,inno-combphy";
-		reg = <0 0x04f00000 0 0x00080000>,
-		      <0 0x04f80000 0 0x00080000>;
+		reg = <0x04f00000 0x00080000>,
+		      <0x04f80000 0x00080000>;
 		reg-names = "phy-ctl", "phy-clk";
 		power-domains = <&pck600 PD_PCIE>;
 		phy_refclk_sel = <0>;
@@ -610,12 +611,12 @@ soc_block = r'''
 		#address-cells = <3>;
 		#size-cells = <2>;
 		bus-range = <0x00 0xff>;
-		reg = <0 0x04800000 0 0x00480000>;
+		reg = <0x04800000 0x00480000>;
 		reg-names = "dbi";
 		device_type = "pci";
-		ranges = <0x00000800 0 0x20000000 0 0x20000000 0 0x01000000>,
-			 <0x81000000 0 0x21000000 0 0x21000000 0 0x01000000>,
-			 <0x82000000 0 0x22000000 0 0x22000000 0 0x0e000000>;
+		ranges = <0x00000800 0 0x20000000 0x20000000 0 0x01000000>,
+			 <0x81000000 0 0x21000000 0x21000000 0 0x01000000>,
+			 <0x82000000 0 0x22000000 0x22000000 0 0x0e000000>;
 		num-lanes = <1>;
 		phys = <&combophy PHY_TYPE_PCIE>;
 		phy-names = "pcie-phy";
@@ -767,8 +768,8 @@ configure_and_compile_gate() {
     log "Enabling and cross-compiling the PCIe, PHY and NVMe path."
     run "$scripts_config" --file "$KERNEL_DIR/.config" --enable PCI
     run "$scripts_config" --file "$KERNEL_DIR/.config" --enable PCI_MSI
-    run "$scripts_config" --file "$KERNEL_DIR/.config" --enable AW_PCIE_RC
-    run "$scripts_config" --file "$KERNEL_DIR/.config" --enable PHY_SUNXI_INNO_COMBOPHY
+    run "$scripts_config" --file "$KERNEL_DIR/.config" --module AW_PCIE_RC
+    run "$scripts_config" --file "$KERNEL_DIR/.config" --module PHY_SUNXI_INNO_COMBOPHY
     run "$scripts_config" --file "$KERNEL_DIR/.config" --enable NVME_CORE
     run "$scripts_config" --file "$KERNEL_DIR/.config" --enable BLK_DEV_NVME
 
@@ -777,10 +778,10 @@ configure_and_compile_gate() {
         CROSS_COMPILE="$CROSS_COMPILE" \
         olddefconfig
 
-    grep -Fxq 'CONFIG_AW_PCIE_RC=y' "$KERNEL_DIR/.config" ||
-        die "CONFIG_AW_PCIE_RC was not built in."
-    grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=y' "$KERNEL_DIR/.config" ||
-        die "CONFIG_PHY_SUNXI_INNO_COMBOPHY was not built in."
+    grep -Fxq 'CONFIG_AW_PCIE_RC=m' "$KERNEL_DIR/.config" ||
+        die "CONFIG_AW_PCIE_RC was not configured as a module."
+    grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$KERNEL_DIR/.config" ||
+        die "CONFIG_PHY_SUNXI_INNO_COMBOPHY was not configured as a module."
     grep -Fxq 'CONFIG_BLK_DEV_NVME=y' "$KERNEL_DIR/.config" ||
         die "CONFIG_BLK_DEV_NVME was not built in."
 
@@ -806,6 +807,9 @@ validate_compiled_dtb() {
     run dtc \
         -I dtb \
         -O dts \
+        -E ranges_format \
+        -E reg_format \
+        -E simple_bus_reg \
         -Wno-unit_address_vs_reg \
         -o "$PCIE_DTS_REPORT" \
         "$BOARD_DTB"
@@ -816,14 +820,18 @@ validate_compiled_dtb() {
         die "Compiled DTB does not enable the combo PHY."
     [[ "$(fdtget -t u "$BOARD_DTB" /soc/pcie@4800000 max-link-speed)" == "2" ]] ||
         die "Compiled DTB does not request PCIe Gen2."
+    [[ "$(fdtget -t u "$BOARD_DTB" /soc '#address-cells')" == "1" ]] ||
+        die "Compiled DTB /soc bus does not use one address cell."
+    [[ "$(fdtget -t u "$BOARD_DTB" /soc '#size-cells')" == "1" ]] ||
+        die "Compiled DTB /soc bus does not use one size cell."
     [[ "$(fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 reg)" == \
-       "0 4800000 0 480000" ]] ||
+       "4800000 480000" ]] ||
         die "Compiled DTB PCIe register range is incorrect."
     [[ "$(fdtget -t x "$BOARD_DTB" /soc/phy@4f00000 reg)" == \
-       "0 4f00000 0 80000 0 4f80000 0 80000" ]] ||
+       "4f00000 80000 4f80000 80000" ]] ||
         die "Compiled DTB combo-PHY register ranges are incorrect."
     [[ "$(fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 ranges)" == \
-       "800 0 20000000 0 20000000 0 1000000 81000000 0 21000000 0 21000000 0 1000000 82000000 0 22000000 0 22000000 0 e000000" ]] ||
+       "800 0 20000000 20000000 0 1000000 81000000 0 21000000 21000000 0 1000000 82000000 0 22000000 22000000 0 e000000" ]] ||
         die "Compiled DTB PCIe outbound address windows are incorrect."
 
     combophy_phandle="$(fdtget -t x "$BOARD_DTB" /soc/phy@4f00000 phandle)"
@@ -846,9 +854,12 @@ write_stamp_and_report() {
         printf 'bsp_ref=%s\n' "$BSP_REF"
         printf 'bsp_commit=%s\n' "$BSP_EXPECTED_COMMIT"
         printf 'linux_compatibility=6.16\n'
-        printf 'dt_layout=64-bit-soc-cells-v2\n'
+        printf 'dt_layout=mainline-soc-one-cell-v3\n'
+        printf 'driver_mode=initramfs-modules-v3\n'
         printf 'pcie_controller=allwinner,sunxi-pcie-v210-rc\n'
         printf 'pcie_link=gen2-x1\n'
+        printf 'pcie_controller_driver=initramfs-module\n'
+        printf 'pcie_phy_driver=initramfs-module\n'
         printf 'nvme_driver=built-in\n'
         printf 'status=complete\n'
     } >"$PCIE_STAMP"

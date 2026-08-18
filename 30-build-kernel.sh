@@ -207,6 +207,11 @@ enable_kernel_option() {
     run "$SCRIPTS_CONFIG" --file "$KERNEL_CONFIG" --enable "$option"
 }
 
+enable_kernel_module() {
+    local option="$1"
+    run "$SCRIPTS_CONFIG" --file "$KERNEL_CONFIG" --module "$option"
+}
+
 configure_kernel() {
     local required_options=(
         CFG80211 CFG80211_REQUIRE_SIGNED_REGDB
@@ -215,9 +220,12 @@ configure_kernel() {
         FW_LOADER PHYLIB
         REALTEK_PHY STMMAC_ETH STMMAC_PLATFORM DWMAC_SUN8I
         DWMAC_SUN55I SUN55I_PCK600 PM_GENERIC_DOMAINS
-        PCI PCI_MSI AW_PCIE_RC PHY_SUNXI_INNO_COMBOPHY
+        PCI PCI_MSI
         NVME_CORE BLK_DEV_NVME
         IKCONFIG IKCONFIG_PROC
+    )
+    local required_modules=(
+        AW_PCIE_RC PHY_SUNXI_INNO_COMBOPHY
     )
     local option
 
@@ -225,6 +233,10 @@ configure_kernel() {
 
     for option in "${required_options[@]}"; do
         enable_kernel_option "$option"
+    done
+
+    for option in "${required_modules[@]}"; do
+        enable_kernel_module "$option"
     done
 
     run make -C "$KERNEL_DIR" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
@@ -253,6 +265,12 @@ validate_kernel_config() {
             die "Required kernel option is not enabled: $option"
         grep -E "^${option}=(y|m)$" "$KERNEL_CONFIG" >>"$KERNEL_CONFIG_REPORT"
     done
+
+
+    grep -Fxq 'CONFIG_AW_PCIE_RC=m' "$KERNEL_CONFIG" ||
+        die "CONFIG_AW_PCIE_RC must be a module."
+    grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$KERNEL_CONFIG" ||
+        die "CONFIG_PHY_SUNXI_INNO_COMBOPHY must be a module."
 }
 
 build_kernel() {
@@ -324,6 +342,9 @@ validate_board_dtb() {
     dtc \
         -I dtb \
         -O dts \
+        -E ranges_format \
+        -E reg_format \
+        -E simple_bus_reg \
         -Wno-unit_address_vs_reg \
         -o "$decompiled_dts" \
         "$BOARD_DTB"
@@ -339,14 +360,18 @@ validate_board_dtb() {
         die "Compiled board DTB does not enable the PCIe combo PHY."
     [[ "$(fdtget -t u "$BOARD_DTB" /soc/pcie@4800000 max-link-speed)" == "2" ]] ||
         die "Compiled board DTB does not request PCIe Gen2."
+    [[ "$(fdtget -t u "$BOARD_DTB" /soc '#address-cells')" == "1" ]] ||
+        die "Compiled board DTB /soc bus does not use one address cell."
+    [[ "$(fdtget -t u "$BOARD_DTB" /soc '#size-cells')" == "1" ]] ||
+        die "Compiled board DTB /soc bus does not use one size cell."
     [[ "$(fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 reg)" == \
-       "0 4800000 0 480000" ]] ||
+       "4800000 480000" ]] ||
         die "Compiled board DTB has the wrong PCIe register range."
     [[ "$(fdtget -t x "$BOARD_DTB" /soc/phy@4f00000 reg)" == \
-       "0 4f00000 0 80000 0 4f80000 0 80000" ]] ||
+       "4f00000 80000 4f80000 80000" ]] ||
         die "Compiled board DTB has the wrong combo-PHY register ranges."
     [[ "$(fdtget -t x "$BOARD_DTB" /soc/pcie@4800000 ranges)" == \
-       "800 0 20000000 0 20000000 0 1000000 81000000 0 21000000 0 21000000 0 1000000 82000000 0 22000000 0 22000000 0 e000000" ]] ||
+       "800 0 20000000 20000000 0 1000000 81000000 0 21000000 21000000 0 1000000 82000000 0 22000000 22000000 0 e000000" ]] ||
         die "Compiled board DTB has the wrong PCIe outbound address windows."
 
     combophy_phandle="$(fdtget -t x "$BOARD_DTB" /soc/phy@4f00000 phandle)"

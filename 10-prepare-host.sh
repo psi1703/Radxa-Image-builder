@@ -326,8 +326,12 @@ validate_kernel_cache() {
     [[ -s "$KERNEL_DIR/.config" ]] || return 1
     [[ -s "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" ]] || return 1
     [[ -s "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" ]] || return 1
-    grep -Fxq 'dt_layout=64-bit-soc-cells-v2' \
+    grep -Fxq 'dt_layout=mainline-soc-one-cell-v3' \
         "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" || return 1
+    grep -Fxq 'driver_mode=initramfs-modules-v3' \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" || return 1
+    grep -Fxq 'CONFIG_AW_PCIE_RC=m' "$KERNEL_DIR/.config" || return 1
+    grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$KERNEL_DIR/.config" || return 1
 
     tag_commit="$(git -C "$KERNEL_DIR" rev-parse "$LINUX_REF^{commit}" 2>/dev/null || true)"
     [[ "$tag_commit" == "$LINUX_EXPECTED_COMMIT" ]] || return 1
@@ -385,8 +389,12 @@ validate_legacy_kernel_tree() {
     [[ -s "$KERNEL_DIR/.config" ]] || return 1
     [[ -s "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" ]] || return 1
     [[ -s "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" ]] || return 1
-    grep -Fxq 'dt_layout=64-bit-soc-cells-v2' \
+    grep -Fxq 'dt_layout=mainline-soc-one-cell-v3' \
         "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" || return 1
+    grep -Fxq 'driver_mode=initramfs-modules-v3' \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" || return 1
+    grep -Fxq 'CONFIG_AW_PCIE_RC=m' "$KERNEL_DIR/.config" || return 1
+    grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$KERNEL_DIR/.config" || return 1
     grep -Fxq 'status=complete' \
         "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" || return 1
 
