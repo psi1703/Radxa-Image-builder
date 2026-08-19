@@ -28,6 +28,7 @@ readonly DEFAULT_BOOT_MNT="${BOOT_MNT:-$BUILD_ROOT/mnt/one-shot-boot}"
 
 readonly BOARD_DTS="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dts"
 readonly KERNEL_CONFIG="$KERNEL_DIR/.config"
+readonly SPI_DRIVER="$KERNEL_DIR/drivers/spi/spi-sun6i.c"
 readonly GMAC1_DRIVER="$KERNEL_DIR/drivers/net/ethernet/stmicro/stmmac/dwmac-sun55i.c"
 readonly SOC_DTSI="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a523.dtsi"
 readonly PCK600_DRIVER="$KERNEL_DIR/drivers/pmdomain/sunxi/sun55i-pck600.c"
@@ -306,6 +307,24 @@ grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$root_config" ||
 
 grep -Fxq 'CONFIG_BLK_DEV_NVME=y' "$root_config" ||
     die "Installed kernel does not build the NVMe host driver in."
+
+grep -Fxq 'CONFIG_SPI=y' "$root_config" ||
+    die "Installed kernel does not build the SPI core in."
+
+grep -Fxq 'CONFIG_SPI_MEM=y' "$root_config" ||
+    die "Installed kernel does not build the SPI memory framework in."
+
+grep -Fxq 'CONFIG_SPI_SUN6I=y' "$root_config" ||
+    die "Installed kernel does not build the Allwinner SPI driver in."
+
+grep -Fxq 'CONFIG_MTD=y' "$root_config" ||
+    die "Installed kernel does not build the MTD core in."
+
+grep -Fxq 'CONFIG_MTD_BLOCK=y' "$root_config" ||
+    die "Installed kernel does not build MTD block support in."
+
+grep -Fxq 'CONFIG_MTD_SPI_NOR=y' "$root_config" ||
+    die "Installed kernel does not build SPI-NOR support in."
 
 grep -Fxq 'CONFIG_PWRSEQ_SIMPLE=y' "$root_config" ||
     die "Installed kernel does not build the simple MMC power sequencer in."
@@ -1437,6 +1456,9 @@ local pio_pg_supply
 local pwrseq_phandle
 local r_pio_phandle
 local rgmii1_phandle
+local spi0_cs0_phandle
+local spi0_pc_phandle
+local spi0_pinctrl
 local reset_bank
 local reset_flags
 local reset_gpio_phandle
@@ -1628,6 +1650,79 @@ pcie_power_domain="$(
 
 [[ "$pcie_power_domain" == "$pck600_phandle 7" ]] ||
     die "Installed DTB does not connect PCIe to PCK600 PD_PCIE."
+
+[[ "$(fdtget -t s "$target_dtb" /soc/spi@4025000 compatible)" == \
+   "allwinner,sun55i-a523-spi" ]] ||
+    die "Installed DTB lacks the A523 SPI0 compatible."
+
+[[ "$(fdtget -t s "$target_dtb" /soc/spi@4025000 status)" == \
+   "okay" ]] ||
+    die "Installed DTB does not enable SPI0."
+
+[[ "$(fdtget -t x "$target_dtb" /soc/spi@4025000 reg)" == \
+   "4025000 1000" ]] ||
+    die "Installed DTB has the wrong SPI0 register range."
+
+[[ "$(fdtget -t s \
+    "$target_dtb" \
+    /soc/pinctrl@2000000/spi0-pc-pins \
+    pins)" == "PC2 PC4 PC12" ]] ||
+    die "Installed DTB has the wrong SPI0 data/clock pins."
+
+[[ "$(fdtget -t u \
+    "$target_dtb" \
+    /soc/pinctrl@2000000/spi0-pc-pins \
+    allwinner,pinmux)" == "4" ]] ||
+    die "Installed DTB has the wrong SPI0 data/clock pinmux."
+
+[[ "$(fdtget -t s \
+    "$target_dtb" \
+    /soc/pinctrl@2000000/spi0-cs0-pc-pin \
+    pins)" == "PC3" ]] ||
+    die "Installed DTB has the wrong SPI0 CS0 pin."
+
+[[ "$(fdtget -t u \
+    "$target_dtb" \
+    /soc/pinctrl@2000000/spi0-cs0-pc-pin \
+    allwinner,pinmux)" == "4" ]] ||
+    die "Installed DTB has the wrong SPI0 CS0 pinmux."
+
+spi0_pc_phandle="$(
+    fdtget -t x \
+        "$target_dtb" \
+        /soc/pinctrl@2000000/spi0-pc-pins \
+        phandle
+)"
+spi0_cs0_phandle="$(
+    fdtget -t x \
+        "$target_dtb" \
+        /soc/pinctrl@2000000/spi0-cs0-pc-pin \
+        phandle
+)"
+spi0_pinctrl="$(fdtget -t x "$target_dtb" /soc/spi@4025000 pinctrl-0)"
+
+[[ "$spi0_pinctrl" == "$spi0_pc_phandle $spi0_cs0_phandle" ]] ||
+    die "Installed DTB has the wrong SPI0 pinctrl references."
+
+[[ "$(fdtget -t s "$target_dtb" /soc/spi@4025000 pinctrl-names)" == \
+   "default" ]] ||
+    die "Installed DTB has the wrong SPI0 pinctrl name."
+
+[[ "$(fdtget -t s \
+    "$target_dtb" \
+    /soc/spi@4025000/flash@0 \
+    compatible)" == "jedec,spi-nor" ]] ||
+    die "Installed DTB lacks the SPI-NOR flash compatible."
+
+[[ "$(fdtget -t u "$target_dtb" /soc/spi@4025000/flash@0 reg)" == \
+   "0" ]] ||
+    die "Installed DTB has the wrong SPI-NOR chip select."
+
+[[ "$(fdtget -t u \
+    "$target_dtb" \
+    /soc/spi@4025000/flash@0 \
+    spi-max-frequency)" == "50000000" ]] ||
+    die "Installed DTB has the wrong SPI-NOR frequency."
 
 cldo4_phandle="$(
     fdtget -t x \
@@ -1833,6 +1928,7 @@ require_nonempty_file "$PCK600_BINDING"
 require_nonempty_file "$R_CCU_RESET_BINDING"
 require_nonempty_file "$R_CCU_DRIVER"
 require_nonempty_file "$AXP20X_MFD_DRIVER"
+require_nonempty_file "$SPI_DRIVER"
 require_nonempty_file "$PINCTRL_DRIVER"
 require_nonempty_file "$R_PINCTRL_DRIVER"
 require_nonempty_file "$MMC_PWRSEQ_SIMPLE_DRIVER"
@@ -1855,6 +1951,41 @@ grep -Fxq 'CONFIG_PM_GENERIC_DOMAINS=y' "$KERNEL_CONFIG" ||
 
 grep -Fxq 'CONFIG_PWRSEQ_SIMPLE=y' "$KERNEL_CONFIG" ||
     die "CONFIG_PWRSEQ_SIMPLE is not built in."
+
+grep -Fxq 'CONFIG_SPI=y' "$KERNEL_CONFIG" ||
+    die "CONFIG_SPI is not built in."
+
+grep -Fxq 'CONFIG_SPI_MEM=y' "$KERNEL_CONFIG" ||
+    die "CONFIG_SPI_MEM is not built in."
+
+grep -Fxq 'CONFIG_SPI_SUN6I=y' "$KERNEL_CONFIG" ||
+    die "CONFIG_SPI_SUN6I is not built in."
+
+grep -Fxq 'CONFIG_MTD=y' "$KERNEL_CONFIG" ||
+    die "CONFIG_MTD is not built in."
+
+grep -Fxq 'CONFIG_MTD_BLOCK=y' "$KERNEL_CONFIG" ||
+    die "CONFIG_MTD_BLOCK is not built in."
+
+grep -Fxq 'CONFIG_MTD_SPI_NOR=y' "$KERNEL_CONFIG" ||
+    die "CONFIG_MTD_SPI_NOR is not built in."
+
+grep -qF \
+    '{ .compatible = "allwinner,sun55i-a523-spi", .data = &sun50i_r329_spi_cfg },' \
+    "$SPI_DRIVER" ||
+    die "spi-sun6i.c lacks the A523 controller compatible."
+
+grep -qF 'spi0: spi@4025000 {' "$SOC_DTSI" ||
+    die "A523 SPI0 controller node is missing from sun55i-a523.dtsi."
+
+grep -qF 'spi0_pc_pins: spi0-pc-pins {' "$SOC_DTSI" ||
+    die "A523 SPI0 pinctrl node is missing from sun55i-a523.dtsi."
+
+grep -qF '&spi0 {' "$BOARD_DTS" ||
+    die "Cubie A5E SPI0 enablement is missing from the board DTS."
+
+grep -qF 'compatible = "jedec,spi-nor";' "$BOARD_DTS" ||
+    die "Cubie A5E SPI-NOR node is missing from the board DTS."
 
 grep -qF 'if (device_property_present(dev, "resets")) {' \
     "$MMC_PWRSEQ_SIMPLE_DRIVER" ||
@@ -2110,6 +2241,8 @@ printf 'Inapplicable EFI automount masked: yes\n'
 printf 'Timezone: Asia/Dubai\n'
 printf 'Installed DTB validated: yes\n'
 printf 'PCIe/PHY initramfs modules validated: yes\n'
+printf 'A523 SPI0 and SPI-NOR DT wiring validated: yes\n'
+printf 'SPI and MTD/SPI-NOR drivers built in: yes\n'
 printf 'Read-only remount validation: yes\n'
 printf '\nEvidence files:\n'
 printf 'Extlinux: %s\n' "$VALIDATION_EXTLINUX"
@@ -2166,7 +2299,7 @@ UPDATE_VERSION="$(tr -d '[:space:]' <"$UPDATE_VERSION_FILE")"
 [[ "$UPDATE_VERSION" =~ ^[A-Za-z0-9._+:-]+$ ]] ||
     die "Update version is invalid: $UPDATE_VERSION"
 
-log "Stage 80 revision: pcie-initramfs-and-dtb-structure-v3-20260818"
+log "Stage 80 revision: a523-spi-nor-validation-v1-20260819"
 log "Beginning clean read-only target validation."
 
 load_target_layout
