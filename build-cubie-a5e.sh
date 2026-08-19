@@ -124,6 +124,7 @@ stages+=(
     "20-backport-gmac1.sh"
     "22-backport-pcie.sh"
     "25-apply-hardware-dts.sh"
+    "27-backport-spi.sh"
     "30-build-kernel.sh"
     "40-build-aic8800.sh"
     "45-build-update-bundle.sh"
@@ -601,6 +602,7 @@ compute_build_fingerprints() {
         "$SCRIPT_DIR/20-backport-gmac1.sh"
         "$SCRIPT_DIR/22-backport-pcie.sh"
         "$SCRIPT_DIR/25-apply-hardware-dts.sh"
+        "$SCRIPT_DIR/27-backport-spi.sh"
         "$SCRIPT_DIR/30-build-kernel.sh"
     )
 
