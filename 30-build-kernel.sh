@@ -25,6 +25,7 @@ readonly BOARD_DTB="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-
 readonly SYSTEM_MAP="$KERNEL_DIR/System.map"
 readonly KERNEL_SYMVERS="$KERNEL_DIR/Module.symvers"
 readonly VMLINUX="$KERNEL_DIR/vmlinux"
+readonly SPI_DRIVER="$KERNEL_DIR/drivers/spi/spi-sun6i.c"
 readonly PINCTRL_DRIVER="$KERNEL_DIR/drivers/pinctrl/sunxi/pinctrl-sun55i-a523.c"
 readonly R_PINCTRL_DRIVER="$KERNEL_DIR/drivers/pinctrl/sunxi/pinctrl-sun55i-a523-r.c"
 readonly MMC_PWRSEQ_SIMPLE_DRIVER="$KERNEL_DIR/drivers/mmc/core/pwrseq_simple.c"
@@ -222,6 +223,8 @@ configure_kernel() {
         DWMAC_SUN55I SUN55I_PCK600 PM_GENERIC_DOMAINS
         PCI PCI_MSI
         NVME_CORE BLK_DEV_NVME
+        SPI SPI_MEM SPI_SUN6I
+        MTD MTD_BLOCK MTD_SPI_NOR
         IKCONFIG IKCONFIG_PROC
     )
     local required_modules=(
@@ -254,6 +257,8 @@ validate_kernel_config() {
         CONFIG_PCI CONFIG_PCI_MSI CONFIG_AW_PCIE_RC
         CONFIG_PHY_SUNXI_INNO_COMBOPHY CONFIG_NVME_CORE
         CONFIG_BLK_DEV_NVME
+        CONFIG_SPI CONFIG_SPI_MEM CONFIG_SPI_SUN6I
+        CONFIG_MTD CONFIG_MTD_BLOCK CONFIG_MTD_SPI_NOR
         CONFIG_PM_GENERIC_DOMAINS CONFIG_IKCONFIG CONFIG_IKCONFIG_PROC
     )
     local option
@@ -271,6 +276,15 @@ validate_kernel_config() {
         die "CONFIG_AW_PCIE_RC must be a module."
     grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$KERNEL_CONFIG" ||
         die "CONFIG_PHY_SUNXI_INNO_COMBOPHY must be a module."
+
+    grep -Fxq 'CONFIG_SPI_SUN6I=y' "$KERNEL_CONFIG" ||
+        die "CONFIG_SPI_SUN6I must be built in."
+    grep -Fxq 'CONFIG_MTD_SPI_NOR=y' "$KERNEL_CONFIG" ||
+        die "CONFIG_MTD_SPI_NOR must be built in."
+    grep -qF \
+        '{ .compatible = "allwinner,sun55i-a523-spi", .data = &sun50i_r329_spi_cfg },' \
+        "$SPI_DRIVER" ||
+        die "spi-sun6i.c lacks the A523 controller compatible."
 }
 
 build_kernel() {
@@ -323,6 +337,9 @@ validate_board_dtb() {
     local pcie_power
     local pck600_phandle
     local r_pio_phandle
+    local spi0_cs0_phandle
+    local spi0_pc_phandle
+    local spi0_pinctrl
     local wifi_3v3_phandle
     local wifi_interrupt_parent
 
@@ -387,6 +404,68 @@ validate_board_dtb() {
     )"
     [[ "$pcie_power" == "$pck600_phandle 7" ]] ||
         die "Compiled board DTB has the wrong PCIe power-domain reference."
+
+    [[ "$(fdtget -t s "$BOARD_DTB" /soc/spi@4025000 compatible)" == \
+       "allwinner,sun55i-a523-spi" ]] ||
+        die "Compiled board DTB lacks the A523 SPI0 compatible."
+    [[ "$(fdtget -t s "$BOARD_DTB" /soc/spi@4025000 status)" == "okay" ]] ||
+        die "Compiled board DTB does not enable SPI0."
+    [[ "$(fdtget -t x "$BOARD_DTB" /soc/spi@4025000 reg)" == \
+       "4025000 1000" ]] ||
+        die "Compiled board DTB has the wrong SPI0 register range."
+    [[ "$(fdtget -t s \
+        "$BOARD_DTB" \
+        /soc/pinctrl@2000000/spi0-pc-pins \
+        pins)" == "PC2 PC4 PC12" ]] ||
+        die "Compiled board DTB has the wrong SPI0 data/clock pins."
+    [[ "$(fdtget -t u \
+        "$BOARD_DTB" \
+        /soc/pinctrl@2000000/spi0-pc-pins \
+        allwinner,pinmux)" == "4" ]] ||
+        die "Compiled board DTB has the wrong SPI0 data/clock pinmux."
+    [[ "$(fdtget -t s \
+        "$BOARD_DTB" \
+        /soc/pinctrl@2000000/spi0-cs0-pc-pin \
+        pins)" == "PC3" ]] ||
+        die "Compiled board DTB has the wrong SPI0 CS0 pin."
+    [[ "$(fdtget -t u \
+        "$BOARD_DTB" \
+        /soc/pinctrl@2000000/spi0-cs0-pc-pin \
+        allwinner,pinmux)" == "4" ]] ||
+        die "Compiled board DTB has the wrong SPI0 CS0 pinmux."
+
+    spi0_pc_phandle="$(
+        fdtget -t x \
+            "$BOARD_DTB" \
+            /soc/pinctrl@2000000/spi0-pc-pins \
+            phandle
+    )"
+    spi0_cs0_phandle="$(
+        fdtget -t x \
+            "$BOARD_DTB" \
+            /soc/pinctrl@2000000/spi0-cs0-pc-pin \
+            phandle
+    )"
+    spi0_pinctrl="$(fdtget -t x "$BOARD_DTB" /soc/spi@4025000 pinctrl-0)"
+
+    [[ "$spi0_pinctrl" == "$spi0_pc_phandle $spi0_cs0_phandle" ]] ||
+        die "Compiled board DTB has the wrong SPI0 pinctrl references."
+    [[ "$(fdtget -t s "$BOARD_DTB" /soc/spi@4025000 pinctrl-names)" == \
+       "default" ]] ||
+        die "Compiled board DTB has the wrong SPI0 pinctrl name."
+    [[ "$(fdtget -t s \
+        "$BOARD_DTB" \
+        /soc/spi@4025000/flash@0 \
+        compatible)" == "jedec,spi-nor" ]] ||
+        die "Compiled board DTB lacks the SPI-NOR flash compatible."
+    [[ "$(fdtget -t u "$BOARD_DTB" /soc/spi@4025000/flash@0 reg)" == \
+       "0" ]] ||
+        die "Compiled board DTB has the wrong SPI-NOR chip select."
+    [[ "$(fdtget -t u \
+        "$BOARD_DTB" \
+        /soc/spi@4025000/flash@0 \
+        spi-max-frequency)" == "50000000" ]] ||
+        die "Compiled board DTB has the wrong SPI-NOR frequency."
 
     grep -qF 'regulator-name = "3v3-wifi";' "$decompiled_dts" ||
         die "Compiled board DTB lacks the PL7-controlled Wi-Fi supply."
@@ -503,6 +582,9 @@ write_reports() {
         printf 'PCIe root complex: Allwinner v210, Gen2 x1, built in\n'
         printf 'PCIe combo PHY: Innosilicon, built in\n'
         printf 'NVMe host driver: built in\n'
+        printf 'A523 SPI0 controller driver: built in\n'
+        printf 'SPI-NOR framework: built in\n'
+        printf 'Cubie A5E SPI-NOR maximum frequency: 50000000 Hz\n'
         printf 'Wi-Fi power sequence: PM1 reset with 200 ms delay\n'
         printf 'MMC power-sequence reset routing: explicit resets property; reset-gpios use GPIO consumer path\n'
         printf 'Wi-Fi I/O supply: BLDO1 at 1.8 V, always on\n'
@@ -543,6 +625,7 @@ main() {
     need_dir "$KERNEL_DIR"
     require_nonempty_file "$KERNEL_CONFIG"
     require_nonempty_file "$SCRIPTS_CONFIG"
+    require_nonempty_file "$SPI_DRIVER"
     require_nonempty_file "$WENS_REGDB_CERT"
 
     log "Kernel build stage starting."
