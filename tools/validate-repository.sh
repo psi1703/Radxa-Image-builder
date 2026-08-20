@@ -22,6 +22,7 @@ mapfile -d '' shell_files < <(
 runtime_programs=(
     "$PROJECT_ROOT/assets/rsetup"
     "$PROJECT_ROOT/assets/cubie-a5e-update"
+    "$PROJECT_ROOT/assets/cubie-a5e-install-nvme"
     "$PROJECT_ROOT/assets/ensure-radxa-trixie-repo"
 )
 readonly runtime_programs
@@ -86,6 +87,21 @@ grep -Fxq \
 
 grep -Fq '"22-backport-pcie.sh"' \
     "$PROJECT_ROOT/build-cubie-a5e.sh" || fail "PCIe backport stage is missing."
+
+grep -Fq 'Install the current Cubie A5E system to NVMe' \
+    "$PROJECT_ROOT/assets/rsetup" || fail "rsetup NVMe migration menu is missing."
+grep -Fq '"$CUBIE_NVME_INSTALL" --tui' \
+    "$PROJECT_ROOT/assets/rsetup" || fail "rsetup does not invoke the managed NVMe installer."
+grep -Fq 'readonly NVME_INSTALLER_SRC="$SCRIPT_DIR/assets/cubie-a5e-install-nvme"' \
+    "$PROJECT_ROOT/60-install-linux-6.16.sh" || fail "Stage 60 NVMe installer source wiring is missing."
+grep -Fq 'install_nvme_installer' \
+    "$PROJECT_ROOT/60-install-linux-6.16.sh" || fail "Stage 60 NVMe installer installation step is missing."
+grep -Fq 'local nvme_installer="$ROOT_MNT/usr/local/sbin/cubie-a5e-install-nvme"' \
+    "$PROJECT_ROOT/80-validate-image.sh" || fail "Stage 80 NVMe installer validation is missing."
+grep -Fq 'iflag=count_bytes' \
+    "$PROJECT_ROOT/assets/cubie-a5e-install-nvme" || fail "NVMe installer boot-chain prefix copy is missing."
+grep -Fq 'mkfs.ext4 -F -L rootfs -U random' \
+    "$PROJECT_ROOT/assets/cubie-a5e-install-nvme" || fail "NVMe installer fresh root UUID creation is missing."
 
 grep -Fq 'OUTPUT_MODE="${OUTPUT_MODE:-device}"' \
     "$PROJECT_ROOT/build-cubie-a5e.sh" || fail "Direct-device output default is missing."
