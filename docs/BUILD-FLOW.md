@@ -1,3 +1,4 @@
+[BUILD-FLOW.md](https://github.com/user-attachments/files/31264583/BUILD-FLOW.md)
 # Build flow and provenance
 
 | Stage | Role | Persistent output |
@@ -10,9 +11,9 @@
 | 40 | Reuse hash-validated AIC8800 outputs or build and validate the SDIO modules, then record successful cache state | AIC8800 tree, module manifest, and AIC8800 cache metadata |
 | 45 | Reuse an exact validated bundle or create and sign the managed kernel/vendor update bundle | `build/update-bundles/`, bundle cache metadata, and local signing identity |
 | 50 | Write the Radxa donor disk layout, replace partition 3 with Debian 13, and expand it to the selected target or image size | Physical target or image-backed loop device |
-| 60 | Install the kernel, DTB, firmware, packages, login policy, updater, `rsetup`, and first-boot root-filesystem expansion service | Physical target or image-backed loop device |
+| 60 | Install the kernel, DTB, firmware, packages, login policy, updater, `rsetup`, guarded SD-to-NVMe migration helper, and first-boot root-filesystem expansion service | Physical target or image-backed loop device |
 | 70 | Install the deterministic interface and NetworkManager policy | Physical target or image-backed loop device |
-| 80 | Perform clean, read-only target validation, including expansion-service and free-space checks | Validation report and evidence |
+| 80 | Perform clean, read-only target validation, including the NVMe migration integration, expansion service, and free-space checks | Validation report and evidence |
 
 ## Provenance policy
 
@@ -41,6 +42,8 @@ With `BUILD_MODE=image`, the wrapper runs all stages. `OUTPUT_MODE=device` opera
 With `OUTPUT_MODE=etcher-image`, the wrapper creates a sparse raw disk image directly under `/home/psi/`, attaches it through a temporary loop device with partition scanning, and passes that device through the same Stages 50 through 80. The default image size is 4 GiB; `IMAGE_SIZE_GIB` can select a different whole-number size of at least 4 GiB. The wrapper detaches the loop device and compresses the validated result to `/home/psi/cubie-a5e-debian13-linux6.16-<build-id>.img.xz` only after Stage 80 succeeds, writes the adjacent `.sha256` file, and removes the temporary raw image after successful compression. Image output is restricted to `/home/psi/`.
 
 When an Etcher image is flashed to a larger SD card or SSD, the enabled `cubie-a5e-grow-rootfs.service` runs on first boot. It verifies that the ext4 root filesystem is on final partition 3, expands that partition to the remaining capacity with `growpart`, and expands the filesystem with `resize2fs`. The service records completion only after both operations succeed; if the live kernel cannot reread a changed partition table, the next boot retries safely. Stage 80 verifies the required packages, commands, helper, enabled service, absent completion marker, and minimum root-filesystem free-space headroom before image compression.
+
+The installed `rsetup` wrapper also exposes a guarded **Install the current Cubie A5E system to NVMe** operation. `assets/cubie-a5e-install-nvme` treats the repository's partition-3 root/boot layout as a hard contract: it identifies the live source from `/`, verifies partition 3 is final and the running managed kernel/initramfs/DTB/extlinux/fstab/PCIe-initramfs state is coherent with no pending update, accepts only a whole writable NVMe namespace, rejects mounted/swap targets and undersized devices, preserves the Radxa pre-root boot-chain area, recreates partition 3 to the NVMe capacity with a fresh ext4 UUID, performs a metadata-preserving two-pass filesystem copy, rewrites the managed UUID consumers, and verifies GPT/ext4/kernel/initramfs/DTB/update-layout state before success. Standalone NVMe boot still depends on compatible Cubie A5E SPI boot firmware.
 
 With `BUILD_MODE=update-bundle`, the wrapper runs Stages 10 and 20 through 45. It builds and signs the kernel/vendor update bundle without running the target-writing Stages 50 through 80.
 
