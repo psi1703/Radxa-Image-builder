@@ -1,3 +1,4 @@
+[README.md](https://github.com/user-attachments/files/31264467/README.md)
 # Radxa Cubie A5E Debian 13 / Linux 6.16 Image Builder
 
 This repository rebuilds the hardware-validated Radxa Cubie A5E image from a clean clone. It preserves Radxa's known-good boot chain, replaces the vendor userspace with Debian 13, builds a single Linux 6.16 kernel, backports the required GMAC200 and regulator support, and builds the Radxa AIC8800 SDIO driver.
@@ -51,6 +52,7 @@ chmod 0755 -- \
   tools/*.sh \
   assets/rsetup \
   assets/cubie-a5e-update \
+  assets/cubie-a5e-install-nvme \
   assets/ensure-radxa-trixie-repo
 ```
 
@@ -137,6 +139,28 @@ The `.img.xz` is a complete disk image containing the Radxa boot chain and all t
 The default image size is 4 GiB. A different whole-number size of at least 4 GiB can be selected with `IMAGE_SIZE_GIB`. Stage 50 expands the root partition to fill the generated image. After the image is flashed to a larger SD card or SSD, the enabled `cubie-a5e-grow-rootfs.service` expands final partition 3 and its ext4 root filesystem on first boot so they use all remaining capacity on the storage medium. Stage 80 validates the required expansion packages, helper and enabled service before the image is compressed.
 
 To replace an existing image output deliberately, set `IMAGE_OVERWRITE=1`. Image output is restricted to `/home/psi/`.
+
+## Install the running SD system to NVMe
+
+The generated image installs a guarded Cubie A5E NVMe migration helper at `/usr/local/sbin/cubie-a5e-install-nvme` and exposes it through `rsetup` as **Install the current Cubie A5E system to NVMe**. The operation is destructive to the selected NVMe namespace.
+
+The installer is intentionally specific to this repository's validated disk layout. It requires the running Debian ext4 root and `/boot/extlinux` payload to be on final partition 3. Before any destructive action it also verifies the running managed kernel, initramfs, Cubie A5E DTB, extlinux root UUID, `/etc/fstab`, PCIe/PHY initramfs policy, and absence of a pending managed update. It identifies the source disk from the mounted root filesystem, refuses an NVMe source, accepts only a whole writable `/dev/nvmeXnY` target, refuses mounted or active-swap targets, requires the NVMe to be at least as large as the source media, and requires matching logical sector sizes.
+
+The migration preserves the Radxa boot-chain area before partition 3 with a bounded raw copy, relocates and regenerates the target GPT identifiers, recreates partition 3 to fill the NVMe, creates a fresh ext4 root UUID, copies the running Debian filesystem with metadata-preserving `rsync`, and rewrites `/etc/fstab`, `/boot/extlinux/extlinux.conf`, and `/etc/cubie-a5e-update/layout.env` for the new UUID. It validates the kernel, initramfs, DTB, PCIe initramfs policy, GPT, ext4 filesystem, and managed update metadata before reporting success.
+
+Run it from the wrapper:
+
+```bash
+sudo rsetup
+```
+
+Or invoke the helper directly:
+
+```bash
+sudo /usr/local/sbin/cubie-a5e-install-nvme --tui
+```
+
+Standalone NVMe boot requires compatible Cubie A5E SPI boot firmware. After a successful migration, power the board off completely, remove the microSD card, and boot again. If standalone NVMe boot does not start, install or update the board's SPI boot firmware from the underlying Radxa system configuration and retry.
 
 ## Rebuild the Debian rootfs
 
