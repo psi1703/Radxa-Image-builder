@@ -32,6 +32,7 @@ readonly CONFIG_SRC="$KERNEL_DIR/.config"
 readonly DTB_SRC="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dtb"
 readonly UPDATE_PROGRAM_SRC="$SCRIPT_DIR/assets/cubie-a5e-update"
 readonly RSETUP_WRAPPER_SRC="$SCRIPT_DIR/assets/rsetup"
+readonly NVME_INSTALLER_SRC="$SCRIPT_DIR/assets/cubie-a5e-install-nvme"
 readonly UPDATE_SERVICE_SRC="$SCRIPT_DIR/assets/cubie-a5e-update-finalize.service"
 readonly KERNEL_APT_GUARD_SRC="$SCRIPT_DIR/assets/99-cubie-a5e-managed-kernel"
 readonly BASIC_PACKAGES_SRC="$SCRIPT_DIR/assets/raspios-lite-compatible-packages.txt"
@@ -1830,6 +1831,22 @@ install -d -m 0755 -- "$(dirname -- "$status_file")"
 chmod 0644 "$status_file"
 }
 
+install_nvme_installer() {
+local target="$ROOT_MNT/usr/local/sbin/cubie-a5e-install-nvme"
+
+need_file "$NVME_INSTALLER_SRC"
+
+install -D -m 0755 \
+    "$NVME_INSTALLER_SRC" \
+    "$target"
+
+[[ -x "$target" ]] ||
+    die "Cubie A5E NVMe installer was not installed."
+
+bash -n "$target" ||
+    die "Installed Cubie A5E NVMe installer failed bash syntax validation."
+}
+
 install_update_manager() {
 local root_uuid
 local boot_uuid
@@ -2240,6 +2257,8 @@ printf 'Trusted update public key installed: yes\n'
 printf 'rsetup update gateway installed: yes\n'
 printf 'rsetup and librtui installed from packages: yes\n'
 printf 'rsetup chroot source-chain smoke test: PASS\n'
+printf 'rsetup NVMe migration entry installed: yes\n'
+printf 'NVMe installer path: /usr/local/sbin/cubie-a5e-install-nvme\n'
 printf 'Raspberry Pi OS Lite compatible base utilities installed: yes\n'
 printf 'Basic package manifest: %s\n' "$BASIC_PACKAGES_TARGET"
 printf 'Stage 60 runtime rootfs cache status: %s\n' "$RUNTIME_CACHE_STATUS"
@@ -2352,6 +2371,7 @@ create_initramfs
 validate_initramfs_regulatory_database
 copy_boot_payload
 update_extlinux
+install_nvme_installer
 install_update_manager
 clean_target_apt_cache
 validate_rsetup_runtime
@@ -2363,7 +2383,7 @@ write_install_report
 log "Installed Linux $KERNEL_RELEASE."
 log "Set extlinux default to the single cubie-a5e entry."
 log "Removed the official Linux 5.15 kernel and recovery entries."
-log "Installed and smoke-tested rsetup with signed Cubie A5E updates."
+log "Installed and smoke-tested rsetup with signed Cubie A5E updates and NVMe migration."
 log "Installed the Raspberry Pi OS Lite compatible base utility set."
 log "Installed one-time automatic root filesystem expansion."
 log "Cleaned disposable target APT caches to reduce image size."
