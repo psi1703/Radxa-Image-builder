@@ -1265,6 +1265,7 @@ local service="$ROOT_MNT/usr/lib/systemd/system/cubie-a5e-update-finalize.servic
 local service_link="$ROOT_MNT/etc/systemd/system/multi-user.target.wants/cubie-a5e-update-finalize.service"
 local rsetup_wrapper="$ROOT_MNT/usr/local/bin/rsetup"
 local updater="$ROOT_MNT/usr/local/sbin/cubie-a5e-update"
+local nvme_installer="$ROOT_MNT/usr/local/sbin/cubie-a5e-install-nvme"
 local update_bundle
 local verify_dir
 
@@ -1275,10 +1276,12 @@ require_nonempty_file "$trusted_key"
 require_nonempty_file "$service"
 require_nonempty_file "$rsetup_wrapper"
 require_nonempty_file "$updater"
+require_nonempty_file "$nvme_installer"
 require_nonempty_file "$ROOT_MNT/usr/bin/rsetup"
 
 [[ -x "$rsetup_wrapper" ]] || die "rsetup wrapper is not executable."
 [[ -x "$updater" ]] || die "Cubie A5E updater is not executable."
+[[ -x "$nvme_installer" ]] || die "Cubie A5E NVMe installer is not executable."
 [[ -L "$service_link" ]] || die "Update finalization service is not enabled."
 [[ "$(readlink "$service_link")" == \
    "/usr/lib/systemd/system/cubie-a5e-update-finalize.service" ]] ||
@@ -1292,6 +1295,43 @@ grep -Fq 'Cubie A5E signed kernel and board updates' "$rsetup_wrapper" ||
     die "rsetup wrapper lacks the Cubie A5E update menu."
 grep -Fq -- '--self-test' "$rsetup_wrapper" ||
     die "rsetup wrapper lacks its non-interactive self-test."
+grep -Fq 'Install the current Cubie A5E system to NVMe' "$rsetup_wrapper" ||
+    die "rsetup wrapper lacks the Cubie A5E NVMe installation menu."
+grep -Fq '"$CUBIE_NVME_INSTALL" --tui' "$rsetup_wrapper" ||
+    die "rsetup wrapper does not invoke the managed NVMe installer."
+
+bash -n "$nvme_installer" ||
+    die "Installed Cubie A5E NVMe installer failed bash syntax validation."
+grep -Fq 'self-test: PASS' "$nvme_installer" ||
+    die "NVMe installer lacks its non-destructive self-test marker."
+grep -Fq 'Expected the running Cubie A5E root filesystem on partition 3' "$nvme_installer" ||
+    die "NVMe installer lacks the managed partition-3 source guard."
+grep -Fq 'Expected partition 3 to be the final source partition' "$nvme_installer" ||
+    die "NVMe installer lacks the final-source-partition guard."
+grep -Fq 'validate_source_runtime' "$nvme_installer" ||
+    die "NVMe installer lacks managed source-runtime preflight validation."
+grep -Fq 'A managed kernel/board update is pending' "$nvme_installer" ||
+    die "NVMe installer lacks the pending-update safety guard."
+grep -Fq 'Target must be a whole NVMe namespace' "$nvme_installer" ||
+    die "NVMe installer lacks the whole-device target guard."
+grep -Fq 'TARGET_DISK_SIZE >= SOURCE_DISK_SIZE' "$nvme_installer" ||
+    die "NVMe installer lacks the guarded target-capacity check."
+grep -Fq 'iflag=count_bytes' "$nvme_installer" ||
+    die "NVMe installer does not preserve the Radxa pre-root boot-chain area."
+grep -Fq 'sgdisk -G "$TARGET_DISK"' "$nvme_installer" ||
+    die "NVMe installer does not regenerate GPT identifiers on the target."
+grep -Fq 'mkfs.ext4 -F -L rootfs -U random' "$nvme_installer" ||
+    die "NVMe installer does not create a fresh root filesystem UUID."
+grep -Fq -- '-aHAXx' "$nvme_installer" ||
+    die "NVMe installer lacks filesystem-preserving rsync options."
+grep -Fq 'rewrite_target_fstab' "$nvme_installer" ||
+    die "NVMe installer lacks target fstab rewriting."
+grep -Fq 'rewrite_target_extlinux' "$nvme_installer" ||
+    die "NVMe installer lacks target extlinux rewriting."
+grep -Fq 'rewrite_target_layout' "$nvme_installer" ||
+    die "NVMe installer lacks update-layout rewriting."
+grep -Fq 'e2fsck -fn "$TARGET_ROOT_PART"' "$nvme_installer" ||
+    die "NVMe installer lacks final read-only ext4 verification."
 grep -Fq 'ExecStart=/usr/local/sbin/cubie-a5e-update --finalize-boot' "$service" ||
     die "Update finalization service command is incorrect."
 grep -Fq "ACTIVE_KERNEL_RELEASE=$KERNEL_RELEASE" "$state" ||
@@ -2181,6 +2221,8 @@ printf 'Trusted update public key installed: yes\n'
 printf 'rsetup update gateway installed: yes\n'
 printf 'rsetup and librtui packages installed: yes\n'
 printf 'rsetup chroot source-chain smoke test: PASS\n'
+printf 'rsetup NVMe migration entry installed: yes\n'
+printf 'Guarded SD-to-NVMe installer validated: yes\n'
 printf 'Raspberry Pi OS Lite compatible base utilities installed: yes\n'
 printf 'Basic package manifest: %s\n' "$BASIC_PACKAGES_TARGET"
 printf 'Automatic root filesystem expansion validated: yes\n'
