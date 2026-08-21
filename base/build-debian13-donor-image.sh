@@ -2,7 +2,7 @@
 #
 # build-cubie-a5e-official-boot-debian-rootfs.sh
 #
-# Radxa Cubie A5E hybrid image writer. v14q: verified syntax baseline with usr-merge/firmware fixes, official Radxa rsetup payload, PuTTY-safe dialog rendering, and u-boot/overlay support for rsetup Overlays menu.
+# Radxa Cubie A5E hybrid image writer. cleanlog-v1: deterministic GPT repair, quiet donor validation, and Stage-60-owned runtime dependency handling.
 #
 # Purpose:
 #   - Use the official Radxa CLI image as the known-good bootloader/kernel donor.
@@ -112,7 +112,7 @@ confirm_or_fail() {
 
 install_host_deps() {
     local missing=()
-    local packages=(xz-utils util-linux parted cloud-guest-utils e2fsprogs rsync kmod)
+    local packages=(xz-utils util-linux parted cloud-guest-utils e2fsprogs rsync kmod gdisk)
     local pkg
 
     for pkg in "${packages[@]}"; do
@@ -137,6 +137,7 @@ validate_inputs() {
     need_command findmnt
     need_command partprobe
     need_command growpart
+    need_command sgdisk
     need_command mkfs.ext4
     need_command blkid
     need_command rsync
@@ -145,6 +146,7 @@ validate_inputs() {
     need_command umount
     need_command sed
     need_command awk
+    need_command depmod
 }
 
 prepare_target_chroot_mounts() {
@@ -233,8 +235,15 @@ write_official_image() {
     xzcat "$STOCK_IMG_XZ" | dd of="$TARGET_DEVICE" bs=4M status=progress conv=fsync
     sync
 
+    # The donor image is smaller than the generated Etcher image. Move the GPT
+    # backup header to the real end of the target before partprobe/growpart sees
+    # the disk. This prevents libparted from emitting the expected-but-noisy
+    # "not all space appears to be used" diagnostic.
+    log "Relocating GPT backup header to the end of $TARGET_DEVICE"
+    sgdisk -e "$TARGET_DEVICE" >/dev/null
+
     log "Asking kernel to reread partition table"
-    partprobe "$TARGET_DEVICE" || true
+    partprobe "$TARGET_DEVICE"
     blockdev --rereadpt "$TARGET_DEVICE" 2>/dev/null || true
     sleep 2
 
@@ -353,11 +362,11 @@ capture_radxa_cli_payload() {
                 cp -a "$dpkg_info_dir/${pkg}.list" "$BOOT_PAYLOAD_DIR/radxa-cli/package-lists/${pkg}.list"
                 [ -f "$dpkg_info_dir/${pkg}.md5sums" ] && cp -a "$dpkg_info_dir/${pkg}.md5sums" "$BOOT_PAYLOAD_DIR/radxa-cli/package-lists/${pkg}.md5sums"
             else
-                warn "Radxa package list not present in donor: ${pkg}.list"
+                log "Optional Radxa package metadata not present in donor: ${pkg}.list"
             fi
         done
     else
-        warn "Official dpkg info directory not found at $dpkg_info_dir"
+        log "Optional donor dpkg metadata directory not present: $dpkg_info_dir"
     fi
 
     captured_count="$(find "$BOOT_PAYLOAD_DIR/radxa-cli/files" \( -type f -o -type l \) 2>/dev/null | wc -l | tr -d ' ')"
@@ -371,7 +380,7 @@ capture_radxa_cli_payload() {
         tar -C "$BOOT_PAYLOAD_DIR/radxa-cli/files" -cpf "$RADXA_CLI_TAR" .
         log "Radxa CLI payload archive created"
     else
-        warn "No Radxa CLI rsetup payload was captured from the official image"
+        fail "No Radxa CLI rsetup payload was captured from the official image"
     fi
 }
 
@@ -391,8 +400,7 @@ install_radxa_cli_payload() {
         log "Restoring Radxa CLI payload from directory: $payload_dir"
         rsync -aHAX --numeric-ids "$payload_dir/" "$MNT_ROOT/"
     else
-        warn "Skipping rsetup install: no Radxa CLI payload captured"
-        return 0
+        fail "Cannot install rsetup: no Radxa CLI payload was captured"
     fi
 
     # Restore package metadata for the copied Radxa CLI packages when available.
@@ -433,8 +441,7 @@ install_radxa_cli_payload() {
         find "$MNT_ROOT" -xdev \( -name 'rsetup' -o -name 'rsetup-*' -o -name 'librtui' -o -path '*/rsetup/*' -o -path '*/librtui/*' \) \
             2>/dev/null | sed "s#^$MNT_ROOT##" | sort | sed -n '1,260p'
     else
-        warn "rsetup package payload copied, but no rsetup command was found in target"
-        warn "Inspect $BOOT_PAYLOAD_DIR/radxa-cli/files for actual payload paths"
+        fail "rsetup payload was restored, but no rsetup command was found in the target rootfs"
     fi
 
     # Keep the image headless: do not enable any rsetup GUI/session units here.
@@ -481,8 +488,7 @@ capture_official_boot_payload() {
     [ -n "$DONOR_ROOT_UUID" ] || fail "Could not read official root UUID from $root_part"
 
     log "Official donor root UUID: $DONOR_ROOT_UUID"
-    log "Official extlinux.conf:"
-    sed -n '1,160p' "$official_boot_dir/extlinux/extlinux.conf"
+    log "Official extlinux configuration found and validated."
 
     log "Capturing official /boot"
     rsync -aHAX --numeric-ids "$official_boot_dir/" "$BOOT_PAYLOAD_DIR/boot/"
@@ -511,7 +517,7 @@ capture_official_boot_payload() {
 
 expand_root_partition() {
     log "Expanding partition 3 to fill $TARGET_DEVICE"
-    growpart "$TARGET_DEVICE" 3 || warn "growpart reported no change or failed; continuing to format existing partition 3"
+    growpart "$TARGET_DEVICE" 3 || fail "Could not expand partition 3 on $TARGET_DEVICE"
     partprobe "$TARGET_DEVICE" || true
     blockdev --rereadpt "$TARGET_DEVICE" 2>/dev/null || true
     sleep 2
@@ -592,15 +598,11 @@ copy_debian_rootfs() {
     disable_non_required_failed_units
     validate_rsetup_and_runtime_tools
 
-    if command -v depmod >/dev/null 2>&1; then
-        log "Refreshing module dependency metadata inside target rootfs"
-        depmod -b "$MNT_ROOT" "$OFFICIAL_KERNEL_VERSION" || warn "depmod failed; preserved official module metadata remains in place"
-    else
-        warn "Host depmod command missing; skipping module dependency refresh"
-    fi
+    log "Refreshing module dependency metadata inside target rootfs"
+    depmod -b "$MNT_ROOT" "$OFFICIAL_KERNEL_VERSION" ||
+        fail "depmod failed for restored official kernel modules"
 
-    log "Final official extlinux.conf inside new Debian rootfs"
-    sed -n '1,160p' "$MNT_ROOT/boot/extlinux/extlinux.conf"
+    log "Official extlinux configuration restored into the Debian rootfs."
 
     sync
     umount "$MNT_ROOT"
@@ -752,7 +754,7 @@ preseed_runtime_packages_without_chroot() {
     fi
 
     if [ "$TARGET_RUNTIME_PRESEED" != "1" ]; then
-        warn "Skipping no-chroot runtime package preseed because TARGET_RUNTIME_PRESEED=$TARGET_RUNTIME_PRESEED"
+        log "No-chroot runtime package preseed disabled; Stage 60 owns runtime package installation."
         return 0
     fi
 
@@ -821,7 +823,7 @@ EOF
         if [ "$TARGET_RUNTIME_PRESEED_STRICT" = "1" ]; then
             fail "arm64 apt index update failed; cannot preseed required runtime packages"
         fi
-        warn "arm64 apt index update failed; cannot preseed runtime packages now."
+        log "arm64 runtime preseed index update unavailable; Stage 60 will install runtime packages."
         return 0
     fi
 
@@ -834,7 +836,7 @@ EOF
         if [ "$TARGET_RUNTIME_PRESEED_STRICT" = "1" ]; then
             fail "arm64 runtime package download failed; cannot preseed required runtime packages"
         fi
-        warn "arm64 runtime package download failed; cannot preseed runtime packages now."
+        log "arm64 runtime preseed download unavailable; Stage 60 will install runtime packages."
         return 0
     fi
 
@@ -843,7 +845,7 @@ EOF
         if [ "$TARGET_RUNTIME_PRESEED_STRICT" = "1" ]; then
             fail "apt reported success but no arm64 .deb files were downloaded"
         fi
-        warn "apt reported success but no arm64 .deb files were downloaded"
+        log "No arm64 runtime preseed packages were downloaded; Stage 60 will install runtime packages."
         return 0
     fi
 
@@ -851,11 +853,11 @@ EOF
         pkg_name="$(dpkg-deb -f "$deb" Package 2>/dev/null || basename "$deb" | sed 's/_.*//')"
         case "$pkg_name" in
             base-files|base-passwd|usrmerge|usr-is-merged|libc-bin|libc6|libcrypt1)
-                warn "Skipping core filesystem/base package during no-chroot extraction: $(basename "$deb")"
+                log "Skipping protected core package during no-chroot extraction: $(basename "$deb")"
                 continue
                 ;;
             systemd|systemd-*|libsystemd*|udev|libudev*|dbus|dbus-*|bash|dash|coreutils|login|passwd)
-                warn "Skipping boot-critical package during no-chroot extraction: $(basename "$deb")"
+                log "Skipping protected boot-critical package during no-chroot extraction: $(basename "$deb")"
                 continue
                 ;;
         esac
@@ -875,7 +877,7 @@ EOF
         if [ "$TARGET_RUNTIME_PRESEED_STRICT" = "1" ]; then
             fail "Runtime package preseed completed, but required tools are still missing"
         fi
-        warn "Runtime package preseed completed, but one or more tools are still missing."
+        log "Runtime preseed is incomplete; Stage 60 will install and validate the remaining tools."
         return 0
     fi
 
@@ -898,8 +900,7 @@ install_target_runtime_packages() {
     # optional optimization only; first-boot services below install the same
     # runtime packages on the board when network is available.
     if [ "$TARGET_APT_INSTALL" != "1" ]; then
-        warn "Skipping target apt install because TARGET_APT_INSTALL=$TARGET_APT_INSTALL"
-        warn "Runtime extras will be handled by first-boot helper services."
+        log "Target chroot apt install disabled; Stage 60 owns runtime package installation."
         return 0
     fi
 
@@ -908,9 +909,7 @@ install_target_runtime_packages() {
 
     if ! run_target_chroot 'true' >/dev/null 2>&1; then
         cleanup_target_chroot_mounts
-        warn "Cannot run target chroot even with qemu fallback; continuing image build."
-        warn "Install on board after boot if needed: apt-get install -y $TARGET_RUNTIME_PACKAGES"
-        return 0
+        fail "TARGET_APT_INSTALL=1 but the target ARM64 chroot cannot execute."
     fi
 
     if ! run_target_chroot "
@@ -920,9 +919,7 @@ apt-get update
 apt-get install -y --no-install-recommends $TARGET_RUNTIME_PACKAGES
 "; then
         cleanup_target_chroot_mounts
-        warn "Optional target apt install failed; continuing image build."
-        warn "First-boot helper services remain installed for runtime dependency repair."
-        return 0
+        fail "TARGET_APT_INSTALL=1 but runtime package installation failed."
     fi
 
     cleanup_target_chroot_mounts
@@ -993,7 +990,7 @@ EOF
     # package preseed normally supplies it; fail here if still absent because
     # rsetup's overlay functions intentionally require command -v u-boot-update.
     if [ ! -x "$MNT_ROOT/usr/sbin/u-boot-update" ] && [ ! -x "$MNT_ROOT/usr/bin/u-boot-update" ]; then
-        warn "u-boot-update missing after donor/runtime preseed; rsetup overlays cannot update boot entries."
+        log "u-boot-update is not required at the base-write stage; Stage 60 installs the managed U-Boot runtime."
     fi
 
     log "rsetup overlay directory configured: ${overlay_dir}"
@@ -1001,7 +998,7 @@ EOF
 }
 
 disable_non_required_failed_units() {
-    log "Masking non-required failed units for this headless hybrid image"
+    log "Masking non-required units for this headless hybrid image"
 
     install -d -m 0755 "$MNT_ROOT/etc/systemd/system"
 
@@ -1317,7 +1314,7 @@ validate_rsetup_and_runtime_tools() {
     fi
 
     if [ ! -x "$MNT_ROOT/usr/sbin/u-boot-update" ] && [ ! -x "$MNT_ROOT/usr/bin/u-boot-update" ]; then
-        warn "u-boot-update missing; rsetup Overlays menu cannot apply overlay changes until u-boot-menu is installed."
+        log "u-boot-update is deferred to Stage 60 managed U-Boot installation."
     fi
 
     overlay_dir="$(grep -E '^U_BOOT_FDT_OVERLAYS_DIR=' "$MNT_ROOT/etc/default/u-boot" 2>/dev/null | tail -n 1 | cut -d= -f2- | sed 's/[[:space:]]*#.*$//; s/^"//; s/"$//; s/[[:space:]]*$//' || true)"
@@ -1336,22 +1333,22 @@ validate_rsetup_and_runtime_tools() {
     fi
 
     if [ ! -x "$MNT_ROOT/usr/bin/whiptail" ]; then
-        warn "whiptail missing; first-boot dependency service will install it when network is available."
+        log "whiptail is deferred to Stage 60 runtime package installation."
     fi
     if [ ! -x "$MNT_ROOT/usr/bin/dialog" ]; then
-        warn "dialog missing; first-boot dependency service will install it when network is available."
+        log "dialog is deferred to Stage 60 runtime package installation."
     fi
     if [ ! -x "$MNT_ROOT/usr/bin/lsmod" ] && [ ! -x "$MNT_ROOT/bin/lsmod" ]; then
-        warn "lsmod/kmod missing; first-boot dependency service will install it when network is available."
+        log "kmod runtime tools are deferred to Stage 60 runtime package installation."
     fi
     if [ ! -x "$MNT_ROOT/usr/sbin/rfkill" ] && [ ! -x "$MNT_ROOT/usr/bin/rfkill" ] && [ ! -x "$MNT_ROOT/sbin/rfkill" ]; then
-        warn "rfkill missing; first-boot dependency service will install it when network is available."
+        log "rfkill is deferred to Stage 60 runtime package installation."
     fi
     if [ ! -e "$MNT_ROOT/usr/share/terminfo/l/linux" ]; then
-        warn "linux terminfo missing; first-boot dependency service will install ncurses-base when network is available."
+        log "linux terminfo is deferred to Stage 60 runtime package installation."
     fi
     if [ ! -e "$MNT_ROOT/usr/share/terminfo/x/xterm-256color" ]; then
-        warn "xterm-256color terminfo missing; first-boot dependency service will install ncurses-base when network is available."
+        log "xterm-256color terminfo is deferred to Stage 60 runtime package installation."
     fi
 
     if [ "$hard_missing" -ne 0 ]; then
@@ -1723,7 +1720,7 @@ EOF
         ln -sfn "/usr/share/zoneinfo/$TIMEZONE" "$MNT_ROOT/etc/localtime"
         printf '%s\n' "$TIMEZONE" > "$MNT_ROOT/etc/timezone"
     else
-        warn "Timezone data for $TIMEZONE not found in target rootfs"
+        log "Timezone data for $TIMEZONE is not present yet; Stage 60 installs and validates tzdata."
     fi
 
     install_rsetup_tui_defaults
@@ -1891,7 +1888,7 @@ EOF
     if [ -e "$MNT_ROOT/usr/bin/rsetup" ] || [ -e "$MNT_ROOT/usr/sbin/rsetup" ]; then
         log "rsetup CLI present in target rootfs"
     else
-        warn "rsetup CLI is still not present after payload restore"
+        fail "rsetup CLI is not present after payload restore"
     fi
 }
 
