@@ -359,6 +359,12 @@ grep -Fxq 'CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y' "$root_config" ||
 grep -Fxq 'CONFIG_CFG80211_USE_KERNEL_REGDB_KEYS=y' "$root_config" ||
     die "Installed kernel does not include the upstream regulatory signing keys."
 
+grep -Fxq 'CONFIG_REALTEK_PHY=y' "$root_config" ||
+    die "Installed kernel does not build the Realtek PHY driver in."
+
+grep -Fxq '# CONFIG_MICROSEMI_PHY is not set' "$root_config" ||
+    die "Installed kernel still enables the unused Microsemi VSC85xx PHY driver."
+
 if ((SAME_FS == 1)); then
     require_nonempty_file "$BOOT_MNT/boot/vmlinuz-$KERNEL_RELEASE"
     require_nonempty_file "$BOOT_MNT/boot/initrd.img-$KERNEL_RELEASE"
@@ -623,18 +629,20 @@ grep -Fxq 'INTENDED_ROLE=unconfigured-hotspot-ready' \
     "$ROOT_MNT$WLAN_READY_STATUS" ||
     die "The wlan0 hotspot-ready status marker is invalid."
 
-while IFS= read -r -d '' connection_file; do
-    if grep -Eq \
-        '^[[:space:]]*type[[:space:]]*=[[:space:]]*(wifi|802-11-wireless)[[:space:]]*$|^[[:space:]]*\[wifi\][[:space:]]*$' \
-        "$connection_file"; then
-        die "Saved Wi-Fi connection remains in the base image: $connection_file"
-    fi
-done < <(
-    find "$ROOT_MNT/etc/NetworkManager/system-connections" \
-        -maxdepth 1 \
-        -type f \
-        -print0
-)
+if [[ -d "$ROOT_MNT/etc/NetworkManager/system-connections" ]]; then
+    while IFS= read -r -d '' connection_file; do
+        if grep -Eq \
+            '^[[:space:]]*type[[:space:]]*=[[:space:]]*(wifi|802-11-wireless)[[:space:]]*$|^[[:space:]]*\[wifi\][[:space:]]*$' \
+            "$connection_file"; then
+            die "Saved Wi-Fi connection remains in the base image: $connection_file"
+        fi
+    done < <(
+        find "$ROOT_MNT/etc/NetworkManager/system-connections" \
+            -maxdepth 1 \
+            -type f \
+            -print0
+    )
+fi
 
 }
 
@@ -856,6 +864,7 @@ local required_commands=(
     sudo
     u-boot-update
     whiptail
+    zstd
 )
 local required_file
 local required_files=(
@@ -900,6 +909,7 @@ local required_packages=(
     wget
     whiptail
     wpasupplicant
+    zstd
 )
 
 require_nonempty_file "$BASIC_PACKAGES_SRC"
@@ -2170,6 +2180,12 @@ grep -Fxq 'CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y' "$KERNEL_CONFIG" ||
 grep -Fxq 'CONFIG_CFG80211_USE_KERNEL_REGDB_KEYS=y' "$KERNEL_CONFIG" ||
     die "CONFIG_CFG80211_USE_KERNEL_REGDB_KEYS is not enabled."
 
+grep -Fxq 'CONFIG_REALTEK_PHY=y' "$KERNEL_CONFIG" ||
+    die "CONFIG_REALTEK_PHY is not built in."
+
+grep -Fxq '# CONFIG_MICROSEMI_PHY is not set' "$KERNEL_CONFIG" ||
+    die "CONFIG_MICROSEMI_PHY must remain disabled for the Cubie A5E."
+
 grep -Eq '^CONFIG_MMC_SUNXI=(y|m)$' "$KERNEL_CONFIG" ||
     die "CONFIG_MMC_SUNXI is not enabled."
 
@@ -2411,6 +2427,9 @@ printf 'systemd PID1 executable validated: yes\n'
 printf 'NVMe rsync mountpoint preservation validated: yes\n'
 printf 'NVMe on-board SPI preflight validated: yes\n'
 printf 'SPI and MTD/SPI-NOR drivers built in: yes\n'
+printf 'Realtek Ethernet PHY driver enabled: yes\n'
+printf 'Unused Microsemi VSC85xx PHY driver disabled: yes\n'
+printf 'zstd initramfs compressor available: yes\n'
 printf 'Read-only remount validation: yes\n'
 printf '\nEvidence files:\n'
 printf 'Extlinux: %s\n' "$VALIDATION_EXTLINUX"
@@ -2467,7 +2486,7 @@ UPDATE_VERSION="$(tr -d '[:space:]' <"$UPDATE_VERSION_FILE")"
 [[ "$UPDATE_VERSION" =~ ^[A-Za-z0-9._+:-]+$ ]] ||
     die "Update version is invalid: $UPDATE_VERSION"
 
-log "Stage 80 revision: storage-nvme-spi-hardening-v2-20260821"
+log "Stage 80 revision: storage-nvme-spi-cleanlog-v3-20260821"
 log "Beginning clean read-only target validation."
 
 load_target_layout
