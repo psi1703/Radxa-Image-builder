@@ -12,12 +12,12 @@ f9b34e082c490c64a9a180f465dcab8d4509b62e11a258c55140d2bf8302c50f  ./40-build-aic
 ccbefaa8c2f8ed4882bb99bf0cec297c210246ec02e617ca7d2e444765b1b856  ./50-write-base-image.sh
 e055d6d7eebc927a96ab6bf747840350cc548a2d94886c2ff72fdf9649bef5ae  ./60-install-linux-6.16.sh
 f0c940622ddc582427c7ba4a96d37bc3daccf011a972f530ecc43661f84133e0  ./70-install-network-policy.sh
-eb8e0bd602551d7cd8cb89ace59a8acb92ac38be7bb8ba9c95af15859d949d44  ./80-validate-image.sh
+211e0aad362f77a402d3596e0465e943c6f16e2e144fac79567f7e44c5433dbd  ./80-validate-image.sh
 5ecb411190c7f294a42cf12c33aae217d75d48479172ef5660c03a8fb87f75bd  ./LICENSE
 b8492dc4a43c1a9760de0bebeced3474d273bf3cd3b2b7850c45d9adece9fec9  ./README.md
 4f9b5c9ba2b7fae6ebbf008c7902a16696dc029c890f74c33acb4893beacda8c  ./SECURITY.md
 5bd8b4f0d75317c6e480c6643c382f9163a8073af689d9860853dd77a9a764d3  ./assets/99-cubie-a5e-managed-kernel
-da7ca4f122c7ab8420b8f14455c96c707d8ee3a346b255cbc16554c114a5dcc4  ./assets/cubie-a5e-install-nvme
+6503dbbe9b8eb07c98ec1724b9c17547f6669d76c4028545c5f4b57150da03f2  ./assets/cubie-a5e-install-nvme
 7a8e17e0935149985e4d010a4265bf82fdc7133399b5380e0e1297f496986f87  ./assets/cubie-a5e-update
 f252a1eb174bb01a3338712b0339918855bb86a1e5bbd430b70d5a836339b3d0  ./assets/cubie-a5e-update-finalize.service
 7dbcbbff0f2fab7c05565fa57cc602cbd8ebecde3fc01e5a1094ed73a4fa5540  ./assets/ensure-radxa-trixie-repo
@@ -29,4 +29,4 @@ ba24af490c591ba381be96c5095f5650ad4f4b0e7975d277b6af9134327b743c  ./base/build-d
 794a16535ac2096c74b4d4aa6831893e0dd0c8f6b018844c64d0fa7a2737e6b5  ./docs/BUILD-FLOW.md
 23eda42020b60a615508228c9c1926c1f9aa15ee55cf3e097c25ee2847a1f43f  ./docs/VALIDATED-HARDWARE.md
 3f6408a3ebea05e4c7fc37317991b93711b2f4b3d651b6f316eabc640a49a62a  ./lib/common.sh
-24738b66bd2159a9a986932c97fe8f98e9cbec7f3b18b93d9cf7ad93a6b725b3  ./tools/validate-repository.sh
+dd462532f296431d636c57c666c0f50b1d63d68f1f11a891373878ce82e9042c  ./tools/validate-repository.sh
