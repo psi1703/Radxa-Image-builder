@@ -53,6 +53,10 @@ readonly PCIE_MODULE_REL="kernel/drivers/pci/controller/sunxi/pcie_sunxi_host.ko
 readonly PCIE_PHY_MODULE_REL="kernel/drivers/phy/allwinner/phy-sunxi-inno-combophy.ko"
 readonly PCIE_INITRAMFS_STATUS="/var/lib/cubie-a5e/pcie-initramfs.status"
 
+readonly CHROOT_POLICY_RCD="/usr/sbin/policy-rc.d"
+readonly CHROOT_POLICY_RCD_BACKUP="$BUILD_ROOT/.stage60-policy-rc.d.backup"
+readonly CHROOT_POLICY_RCD_STATE="$BUILD_ROOT/.stage60-policy-rc.d.state"
+
 # Radxa does not currently publish the Cubie A5E AW2501 U-Boot packages in the
 # Trixie repository. Keep the known-good board release pinned here, while
 # allowing config/source-pins.env to override the values for a future reviewed
@@ -352,6 +356,7 @@ if [[ -n "$RUNTIME_CACHE_TEMP" &&
 fi
 
 restore_chroot_resolver
+restore_chroot_service_policy
 
 if ((QEMU_INSTALLED_BY_STAGE == 1)); then
     rm -f -- "$QEMU_TARGET_PATH"
@@ -1196,6 +1201,7 @@ run_arm64_chroot '
         whiptail
         wireless-regdb
         wpasupplicant
+        zstd
     )
 
     declare -A checked_packages=()
@@ -1278,10 +1284,12 @@ log "Stage 60 runtime rootfs cache miss: $RUNTIME_CACHE_FINGERPRINT"
 mount_chroot_filesystems
 install_qemu_for_chroot
 install_kernel_apt_guard
+prepare_chroot_service_policy
 purge_packaged_kernels
 remove_existing_kernel_payloads
 ensure_target_runtime_packages
 ensure_initramfs_tools
+restore_chroot_service_policy
 validate_target_runtime_package_state
 clean_target_apt_cache
 publish_runtime_cache
@@ -1372,6 +1380,62 @@ run_arm64_chroot '
 '
 }
 
+prepare_chroot_service_policy() {
+local target_policy="$ROOT_MNT$CHROOT_POLICY_RCD"
+
+rm -f -- "$CHROOT_POLICY_RCD_BACKUP" "$CHROOT_POLICY_RCD_STATE"
+
+if [[ -L "$target_policy" ]]; then
+    printf 'symlink\n' >"$CHROOT_POLICY_RCD_STATE"
+    readlink -- "$target_policy" >>"$CHROOT_POLICY_RCD_STATE"
+elif [[ -e "$target_policy" ]]; then
+    printf 'file\n' >"$CHROOT_POLICY_RCD_STATE"
+    cp -a -- "$target_policy" "$CHROOT_POLICY_RCD_BACKUP"
+else
+    printf 'missing\n' >"$CHROOT_POLICY_RCD_STATE"
+fi
+
+install -D -m 0755 /dev/null "$target_policy"
+cat >"$target_policy" <<'EOF'
+#!/bin/sh
+# Stage 60 image-build policy: package postinst scripts must not start or
+# reload services inside the offline target chroot.
+exit 101
+EOF
+}
+
+restore_chroot_service_policy() {
+local target_policy="$ROOT_MNT$CHROOT_POLICY_RCD"
+local state=""
+local link_target=""
+
+[[ -f "$CHROOT_POLICY_RCD_STATE" ]] || return 0
+
+state="$(sed -n '1p' "$CHROOT_POLICY_RCD_STATE")"
+rm -f -- "$target_policy"
+
+case "$state" in
+    file)
+        [[ -e "$CHROOT_POLICY_RCD_BACKUP" ]] ||
+            die "Saved target policy-rc.d backup is missing."
+        cp -a -- "$CHROOT_POLICY_RCD_BACKUP" "$target_policy"
+        ;;
+    symlink)
+        link_target="$(sed -n '2p' "$CHROOT_POLICY_RCD_STATE")"
+        [[ -n "$link_target" ]] ||
+            die "Saved target policy-rc.d symlink is empty."
+        ln -s -- "$link_target" "$target_policy"
+        ;;
+    missing)
+        ;;
+    *)
+        die "Unknown saved target policy-rc.d state: $state"
+        ;;
+esac
+
+rm -f -- "$CHROOT_POLICY_RCD_BACKUP" "$CHROOT_POLICY_RCD_STATE"
+}
+
 prepare_chroot_resolver() {
 local target_resolver="$ROOT_MNT/etc/resolv.conf"
 
@@ -1459,6 +1523,7 @@ run_arm64_chroot '
         wget
         whiptail
         wpasupplicant
+        zstd
     )
 
     root_resize_packages=(
@@ -1818,10 +1883,16 @@ run_arm64_chroot "
             '$INITBOX_USER'
     fi
 
-    usermod \
-        --home '/home/$INITBOX_USER' \
-        --shell /bin/bash \
-        '$INITBOX_USER'
+    current_home=\"\$(getent passwd '$INITBOX_USER' | cut -d: -f6)\"
+    current_shell=\"\$(getent passwd '$INITBOX_USER' | cut -d: -f7)\"
+
+    if [[ \"\$current_home\" != '/home/$INITBOX_USER' ||
+          \"\$current_shell\" != '/bin/bash' ]]; then
+        usermod \
+            --home '/home/$INITBOX_USER' \
+            --shell /bin/bash \
+            '$INITBOX_USER'
+    fi
 "
 
 for group in sudo adm dialout plugdev netdev; do
@@ -1839,8 +1910,23 @@ group_csv="$(
     printf '%s' "${supplementary_groups[*]}"
 )"
 
-run_arm64_chroot \
-    "usermod --append --groups '$group_csv' '$INITBOX_USER'"
+run_arm64_chroot "
+    IFS=',' read -r -a requested_groups <<< '$group_csv'
+    current_groups=\" \$(id -nG '$INITBOX_USER') \"
+    missing_groups=()
+
+    for requested_group in \"\${requested_groups[@]}\"; do
+        [[ -n \"\$requested_group\" ]] || continue
+        if [[ \"\$current_groups\" != *\" \$requested_group \"* ]]; then
+            missing_groups+=(\"\$requested_group\")
+        fi
+    done
+
+    if ((\${#missing_groups[@]} > 0)); then
+        missing_csv=\"\$(IFS=,; printf '%s' \"\${missing_groups[*]}\")\"
+        usermod --append --groups \"\$missing_csv\" '$INITBOX_USER'
+    fi
+"
 
 install -d -m 1777 -- "$ROOT_MNT/tmp"
 install -m 0600 /dev/null "$INITBOX_PASSWORD_FILE"
@@ -2178,6 +2264,9 @@ run_arm64_chroot \
 
 create_initramfs() {
 log "Creating initramfs for $KERNEL_RELEASE."
+
+[[ -x "$ROOT_MNT/usr/bin/zstd" ]] ||
+    die "zstd is missing from the target runtime; refusing initramfs compressor fallback."
 
 rm -f -- "$ROOT_MNT/boot/initrd.img-$KERNEL_RELEASE"
 
@@ -2517,7 +2606,7 @@ printf 'Managed Cubie A5E entry default: yes\n'
 }
 
 main() {
-log "Stage 60 revision: spi-maintenance-nvme-guard-v3-20260821"
+log "Stage 60 revision: spi-maintenance-nvme-cleanlog-v4-20260821"
 require_command awk
 require_command blkid
 require_command chroot
