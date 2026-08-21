@@ -198,9 +198,17 @@ reject_text \
     "$STAGE27" \
     "Stage 27 still contains the known-bad 50 MHz SPI-NOR setting."
 require_text \
-    'r"(^[ \t]*spi-max-frequency\s*=\s*)<[^>]+>(;)"' \
+    'if re.search(r"^[ \t]*spi-max-frequency\s*=", flash_node, flags=re.MULTILINE):' \
     "$STAGE27" \
-    "Stage 27 does not normalize an already-existing cached SPI-NOR frequency."
+    "Stage 27 does not detect an already-existing SPI-NOR frequency property."
+require_text \
+    'r"^([ \t]*spi-max-frequency\s*=\s*)<[^>]+>;"' \
+    "$STAGE27" \
+    "Stage 27 does not replace an already-existing SPI-NOR frequency property."
+require_text \
+    'r"\g<1><20000000>;"' \
+    "$STAGE27" \
+    "Stage 27 does not normalize an existing SPI-NOR frequency to 20 MHz."
 
 # ---------------------------------------------------------------------------
 # Stage 60: SPI maintenance and NVMe runtime provisioning
