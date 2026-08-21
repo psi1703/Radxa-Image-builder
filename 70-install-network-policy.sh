@@ -246,7 +246,7 @@ chmod 0644 \
     "$NM_WLAN_READY_FILE"
 
 while IFS= read -r -d '' connection_file; do
-    if grep -Eq \
+    if grep -Eqs \
         '^[[:space:]]*type[[:space:]]*=[[:space:]]*(wifi|802-11-wireless)[[:space:]]*$|^[[:space:]]*\[wifi\][[:space:]]*$' \
         "$connection_file"; then
         rm -f -- "$connection_file"
@@ -342,14 +342,16 @@ grep -Fxq 'match-device=interface-name:wlan0' "$NM_WLAN_READY_FILE" ||
 grep -Fxq 'managed=true' "$NM_WLAN_READY_FILE" ||
     die "NetworkManager does not explicitly manage wlan0."
 
-if find "$ROOT_MNT/etc/NetworkManager/system-connections" \
-    -maxdepth 1 \
-    -type f \
-    -exec grep -El \
-        '^[[:space:]]*type[[:space:]]*=[[:space:]]*(wifi|802-11-wireless)[[:space:]]*$|^[[:space:]]*\[wifi\][[:space:]]*$' \
-        {} + |
-    grep -q .; then
-    die "A saved Wi-Fi connection remains in the base image."
+if [[ -d "$ROOT_MNT/etc/NetworkManager/system-connections" ]]; then
+    if find "$ROOT_MNT/etc/NetworkManager/system-connections" \
+        -maxdepth 1 \
+        -type f \
+        -exec grep -Els \
+            '^[[:space:]]*type[[:space:]]*=[[:space:]]*(wifi|802-11-wireless)[[:space:]]*$|^[[:space:]]*\[wifi\][[:space:]]*$' \
+            {} + |
+        grep -q .; then
+        die "A saved Wi-Fi connection remains in the base image."
+    fi
 fi
 
 grep -Fxq 'INTENDED_ROLE=unconfigured-hotspot-ready' "$WLAN_READY_STATUS" ||
@@ -428,6 +430,8 @@ printf 'Official Linux 5.15 recovery entries preserved: no\n'
 }
 
 main() {
+log "Stage 70 revision: deterministic-network-cleanlog-v2-20260821"
+
 need_cmd awk
 need_cmd diff
 need_cmd findmnt
@@ -470,6 +474,7 @@ write_report
 
 log "Installed deterministic interface naming."
 log "Expected names: GMAC0=eth0, GMAC1=eth1, AIC8800=wlan0"
+log "Validated that no saved Wi-Fi profiles remain in the base image."
 log "Left wlan0 managed, disconnected and free of saved Wi-Fi profiles for later hotspot setup."
 log "Extlinux and Wi-Fi module load order were left unchanged."
 log "Network policy report: $NETWORK_REPORT"
