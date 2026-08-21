@@ -61,6 +61,9 @@ readonly ROOT_GROW_PROGRAM="/usr/local/sbin/cubie-a5e-grow-rootfs"
 readonly ROOT_GROW_UNIT="/usr/lib/systemd/system/cubie-a5e-grow-rootfs.service"
 readonly ROOT_GROW_WANTS="/etc/systemd/system/multi-user.target.wants/cubie-a5e-grow-rootfs.service"
 readonly ROOT_GROW_MARKER="/var/lib/cubie-a5e/rootfs-expanded"
+readonly RADXA_UBOOT_VERSION="${RADXA_UBOOT_VERSION:-2018.07-17}"
+readonly RADXA_UBOOT_PAYLOAD_DIR="/usr/lib/u-boot/radxa-cubie-a5e"
+readonly EXPECTED_SPI_FREQUENCY="20000000"
 readonly MINIMUM_ROOT_AVAILABLE_BYTES=$((512 * 1024 * 1024))
 
 if [[ -n "${LOG_DIR:-}" ]]; then
@@ -271,6 +274,27 @@ case "$version_id" in
         ;;
 esac
 
+}
+
+validate_root_runtime_layout() {
+local path
+local tmp_mode
+
+for path in dev proc sys run tmp mnt media; do
+    [[ -d "$ROOT_MNT/$path" ]] ||
+        die "Required runtime mountpoint directory is missing from the target root: /$path"
+    [[ ! -L "$ROOT_MNT/$path" ]] ||
+        die "Required runtime mountpoint must not be a symbolic link: /$path"
+done
+
+tmp_mode="$(stat -c '%a' "$ROOT_MNT/tmp")"
+[[ "$tmp_mode" == "1777" ]] ||
+    die "Target /tmp must have mode 1777; found $tmp_mode."
+
+[[ -x "$ROOT_MNT/sbin/init" ]] ||
+    die "Target /sbin/init is missing or not executable."
+[[ -x "$ROOT_MNT/usr/lib/systemd/systemd" ]] ||
+    die "Target systemd PID1 is missing or not executable."
 }
 
 validate_kernel_payload() {
@@ -753,6 +777,66 @@ status="$(
 [[ "$status" == ii* ]]
 }
 
+validate_spi_maintenance_runtime() {
+local common_version
+local board_version
+local command_name
+local package
+local payload
+local status_file="$ROOT_MNT/var/lib/cubie-a5e/rsetup-self-test.status"
+local version_prefix
+
+for package in mtd-utils u-boot-aw2501 u-boot-radxa-cubie-a5e; do
+    target_package_installed "$package" ||
+        die "Required SPI maintenance package is not installed: $package"
+done
+
+for command_name in flashcp flash_erase; do
+    target_command_exists "$command_name" ||
+        die "Required SPI maintenance command is missing: $command_name"
+done
+
+common_version="$(
+    dpkg-query \
+        --admindir="$ROOT_MNT/var/lib/dpkg" \
+        -W \
+        -f='${Version}' \
+        u-boot-aw2501 2>/dev/null || true
+)"
+board_version="$(
+    dpkg-query \
+        --admindir="$ROOT_MNT/var/lib/dpkg" \
+        -W \
+        -f='${Version}' \
+        u-boot-radxa-cubie-a5e 2>/dev/null || true
+)"
+
+[[ "$common_version" == "$RADXA_UBOOT_VERSION" ]] ||
+    die "Unexpected u-boot-aw2501 version: ${common_version:-missing}; expected $RADXA_UBOOT_VERSION"
+[[ "$board_version" == "$RADXA_UBOOT_VERSION" ]] ||
+    die "Unexpected u-boot-radxa-cubie-a5e version: ${board_version:-missing}; expected $RADXA_UBOOT_VERSION"
+
+for payload in boot0_spinor.bin boot_package.fex sys_partition_nor.bin setup.sh; do
+    require_nonempty_file "$ROOT_MNT$RADXA_UBOOT_PAYLOAD_DIR/$payload"
+done
+
+[[ -x "$ROOT_MNT$RADXA_UBOOT_PAYLOAD_DIR/setup.sh" ]] ||
+    die "Cubie A5E Radxa U-Boot setup backend is not executable."
+
+version_prefix="U-Boot $RADXA_UBOOT_VERSION-boot-aw2501-"
+grep -aFq -- "$version_prefix" \
+    "$ROOT_MNT$RADXA_UBOOT_PAYLOAD_DIR/boot_package.fex" ||
+    die "Packaged Cubie A5E boot_package.fex does not contain the expected U-Boot $RADXA_UBOOT_VERSION marker."
+
+require_nonempty_file "$status_file"
+grep -Fxq 'NVME_INSTALLER_SELF_TEST=PASS' "$status_file" ||
+    die "NVMe installer Stage 60 self-test marker is missing."
+grep -Fxq "RADXA_UBOOT_VERSION=$RADXA_UBOOT_VERSION" "$status_file" ||
+    die "Stage 60 U-Boot validation marker has the wrong version."
+grep -Fxq 'RADXA_UBOOT_BACKEND=PASS' "$status_file" ||
+    die "Stage 60 rsetup U-Boot backend validation marker is missing."
+}
+
 validate_rsetup_and_basic_packages() {
 local basic_manifest="$ROOT_MNT$BASIC_PACKAGES_TARGET"
 local package
@@ -802,6 +886,7 @@ local required_packages=(
     jq
     kmod
     librtui
+    mtd-utils
     network-manager
     nano
     pkexec
@@ -809,7 +894,9 @@ local required_packages=(
     radxa-archive-keyring
     rfkill
     rsetup
+    u-boot-aw2501
     u-boot-menu
+    u-boot-radxa-cubie-a5e
     wget
     whiptail
     wpasupplicant
@@ -1328,6 +1415,27 @@ grep -Fq 'mkfs.ext4 -F -L rootfs -U random' "$nvme_installer" ||
     die "NVMe installer does not create a fresh root filesystem UUID."
 grep -Fq -- '-aHAXx' "$nvme_installer" ||
     die "NVMe installer lacks filesystem-preserving rsync options."
+for exclusion in dev proc run sys tmp mnt media; do
+    grep -Fq -- "--exclude='/${exclusion}/*'" "$nvme_installer" ||
+        die "NVMe installer does not preserve the /$exclusion mountpoint directory."
+    if grep -Fq -- "--exclude='/${exclusion}/***'" "$nvme_installer"; then
+        die "NVMe installer still excludes the /$exclusion mountpoint directory itself."
+    fi
+done
+grep -Fq 'normalize_target_runtime_layout' "$nvme_installer" ||
+    die "NVMe installer lacks target runtime mountpoint normalization."
+grep -Fq 'install -d -m 1777 -- "$TARGET_ROOT_MNT/tmp"' "$nvme_installer" ||
+    die "NVMe installer does not enforce mode 1777 on target /tmp."
+grep -Fq 'validate_runtime_root_layout "$TARGET_ROOT_MNT" "Target"' "$nvme_installer" ||
+    die "NVMe installer does not validate target runtime mountpoints and PID1."
+grep -Fq 'EXPECTED_SPI_FREQUENCY="20000000"' "$nvme_installer" ||
+    die "NVMe installer does not enforce the field-validated 20 MHz SPI-NOR frequency."
+grep -Fq 'validate_spi_bootloader' "$nvme_installer" ||
+    die "NVMe installer lacks the on-board SPI bootloader preflight."
+grep -Fq 'On-board SPI firmware does not contain the installed Cubie A5E U-Boot' "$nvme_installer" ||
+    die "NVMe installer does not reject an outdated on-board SPI bootloader."
+grep -Fq 'dpkg --compare-versions "$aw2501_version" ge "$MINIMUM_UBOOT_VERSION"' "$nvme_installer" ||
+    die "NVMe installer does not enforce the validated minimum SPI U-Boot version."
 grep -Fq 'rewrite_target_fstab' "$nvme_installer" ||
     die "NVMe installer lacks target fstab rewriting."
 grep -Fq 'rewrite_target_extlinux' "$nvme_installer" ||
@@ -1765,8 +1873,8 @@ spi0_pinctrl="$(fdtget -t x "$target_dtb" /soc/spi@4025000 pinctrl-0)"
 [[ "$(fdtget -t u \
     "$target_dtb" \
     /soc/spi@4025000/flash@0 \
-    spi-max-frequency)" == "50000000" ]] ||
-    die "Installed DTB has the wrong SPI-NOR frequency."
+    spi-max-frequency)" == "$EXPECTED_SPI_FREQUENCY" ]] ||
+    die "Installed DTB SPI-NOR frequency is not the field-validated ${EXPECTED_SPI_FREQUENCY} Hz."
 
 cldo4_phandle="$(
     fdtget -t x \
@@ -2031,6 +2139,12 @@ grep -qF '&spi0 {' "$BOARD_DTS" ||
 grep -qF 'compatible = "jedec,spi-nor";' "$BOARD_DTS" ||
     die "Cubie A5E SPI-NOR node is missing from the board DTS."
 
+grep -qF 'spi-max-frequency = <20000000>;' "$BOARD_DTS" ||
+    die "Cubie A5E source DTS does not use the field-validated 20 MHz SPI-NOR frequency."
+if grep -qF 'spi-max-frequency = <50000000>;' "$BOARD_DTS"; then
+    die "Cubie A5E source DTS still contains the rejected 50 MHz SPI-NOR frequency."
+fi
+
 grep -qF 'if (device_property_present(dev, "resets")) {' \
     "$MMC_PWRSEQ_SIMPLE_DRIVER" ||
     die "MMC pwrseq_simple does not use the explicit resets property."
@@ -2288,6 +2402,14 @@ printf 'Timezone: Asia/Dubai\n'
 printf 'Installed DTB validated: yes\n'
 printf 'PCIe/PHY initramfs modules validated: yes\n'
 printf 'A523 SPI0 and SPI-NOR DT wiring validated: yes\n'
+printf 'SPI-NOR maximum frequency: %s Hz\n' "$EXPECTED_SPI_FREQUENCY"
+printf 'mtd-utils installed: yes\n'
+printf 'Radxa Cubie A5E U-Boot maintenance payload: %s\n' "$RADXA_UBOOT_VERSION"
+printf 'Radxa rsetup SPI bootloader backend validated: yes\n'
+printf 'Required root runtime mountpoints validated: yes\n'
+printf 'systemd PID1 executable validated: yes\n'
+printf 'NVMe rsync mountpoint preservation validated: yes\n'
+printf 'NVMe on-board SPI preflight validated: yes\n'
 printf 'SPI and MTD/SPI-NOR drivers built in: yes\n'
 printf 'Read-only remount validation: yes\n'
 printf '\nEvidence files:\n'
@@ -2345,13 +2467,14 @@ UPDATE_VERSION="$(tr -d '[:space:]' <"$UPDATE_VERSION_FILE")"
 [[ "$UPDATE_VERSION" =~ ^[A-Za-z0-9._+:-]+$ ]] ||
     die "Update version is invalid: $UPDATE_VERSION"
 
-log "Stage 80 revision: a523-spi-nor-validation-v1-20260819"
+log "Stage 80 revision: storage-nvme-spi-hardening-v2-20260821"
 log "Beginning clean read-only target validation."
 
 load_target_layout
 mount_read_only_filesystems
 
 validate_root_identity
+validate_root_runtime_layout
 validate_kernel_payload
 validate_module_tree
 validate_module_policy
@@ -2359,6 +2482,7 @@ validate_single_wifi_loader
 validate_firmware
 validate_network_policy
 validate_userland_runtime
+validate_spi_maintenance_runtime
 validate_rsetup_and_basic_packages
 validate_root_autogrow_and_compact_image
 validate_initbox_account_and_login_policy
