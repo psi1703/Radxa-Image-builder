@@ -76,19 +76,13 @@ The image `BUILD_ID` remains timestamped for logs and output filenames. The kern
 To force a clean kernel and AIC8800 rebuild even when the cache is valid:
 
 ```bash
-sudo env \
-  OUTPUT_MODE=etcher-image \
-  KERNEL_REBUILD=1 \
-  ./build-cubie-a5e.sh
+sudo env OUTPUT_MODE=etcher-image KERNEL_REBUILD=1 ./build-cubie-a5e.sh
 ```
 
 To rebuild only the AIC8800 external modules:
 
 ```bash
-sudo env \
-  OUTPUT_MODE=etcher-image \
-  AIC_REBUILD=1 \
-  ./build-cubie-a5e.sh
+sudo env OUTPUT_MODE=etcher-image AIC_REBUILD=1 ./build-cubie-a5e.sh
 ```
 
 Successful cache metadata is stored under `build/cache/`. Missing, stale, inconsistent or hash-mismatched cache state is never trusted; the affected component is rebuilt and the cache is recorded again only after all existing validation gates pass.
@@ -104,11 +98,7 @@ lsblk -o NAME,SIZE,MODEL,SERIAL,TRAN,FSTYPE,MOUNTPOINTS
 Then run:
 
 ```bash
-sudo env \
-  OUTPUT_MODE=device \
-  TARGET_DEVICE=/dev/sdX \
-  CONFIRM_WRITE=1 \
-  ./build-cubie-a5e.sh
+sudo env OUTPUT_MODE=device TARGET_DEVICE=/dev/sdX CONFIRM_WRITE=1 ./build-cubie-a5e.sh
 ```
 
 Replace `/dev/sdX` with the verified whole removable device. `OUTPUT_MODE=device` is the default. The wrapper displays the device identity and rejects known host-system disk paths.
@@ -120,9 +110,7 @@ Omit `CONFIRM_WRITE=1` if you want the interactive `I-UNDERSTAND` confirmation i
 No SD card or SSD needs to be connected:
 
 ```bash
-sudo env \
-  OUTPUT_MODE=etcher-image \
-  ./build-cubie-a5e.sh
+sudo env OUTPUT_MODE=etcher-image ./build-cubie-a5e.sh
 ```
 
 The wrapper creates a sparse raw image and attaches it to a temporary loop device. Stages 50 through 80 use that loop device and perform the same target validation as direct-device mode. The wrapper detaches and compresses the image only after Stage 80 passes.
@@ -167,11 +155,7 @@ Standalone NVMe boot requires compatible Cubie A5E SPI boot firmware. After a su
 The builder normally reuses a completed rootfs. To deliberately replace an incomplete or old generated rootfs:
 
 ```bash
-sudo env \
-  OUTPUT_MODE=device \
-  TARGET_DEVICE=/dev/sdX \
-  ROOTFS_REBUILD=1 \
-  ./build-cubie-a5e.sh
+sudo env OUTPUT_MODE=device TARGET_DEVICE=/dev/sdX ROOTFS_REBUILD=1 ./build-cubie-a5e.sh
 ```
 
 ## Build only a signed update bundle
