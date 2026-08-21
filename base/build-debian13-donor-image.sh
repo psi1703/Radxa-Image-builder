@@ -42,6 +42,12 @@ CONFIRM_WRITE="${CONFIRM_WRITE:-0}"
 TARGET_HOSTNAME="${TARGET_HOSTNAME:-cubie-a5e}"
 TIMEZONE="${TIMEZONE:-Asia/Dubai}"
 
+# The donor root UUID is captured only as a safety reference. Every generated
+# image gets a fresh partition-3 filesystem UUID so separately flashed media
+# cannot collide with the donor or with another generated Cubie A5E image.
+DONOR_ROOT_UUID=""
+ROOT_UUID=""
+
 BOOT_PAYLOAD_DIR="${BOOT_PAYLOAD_DIR:-$WORKDIR/official-boot-payload}"
 RADXA_CLI_TAR="${RADXA_CLI_TAR:-$WORKDIR/radxa-cli-payload.tar}"
 MNT_ROOT="${MNT_ROOT:-$WORKDIR/mnt/official-root}"
@@ -471,10 +477,10 @@ capture_official_boot_payload() {
         fail "Official firmware directory not found at $official_firmware_dir or $official_usr_firmware_dir"
     fi
 
-    ROOT_UUID="$(blkid -s UUID -o value "$root_part")"
-    [ -n "$ROOT_UUID" ] || fail "Could not read official root UUID from $root_part"
+    DONOR_ROOT_UUID="$(blkid -s UUID -o value "$root_part")"
+    [ -n "$DONOR_ROOT_UUID" ] || fail "Could not read official root UUID from $root_part"
 
-    log "Official root UUID: $ROOT_UUID"
+    log "Official donor root UUID: $DONOR_ROOT_UUID"
     log "Official extlinux.conf:"
     sed -n '1,160p' "$official_boot_dir/extlinux/extlinux.conf"
 
@@ -511,15 +517,24 @@ expand_root_partition() {
     sleep 2
 }
 
-format_root_partition_preserving_uuid() {
+format_root_partition_with_fresh_uuid() {
     local root_part
 
     root_part="$(partition_path "$TARGET_DEVICE" 3)"
     [ -b "$root_part" ] || fail "Root partition missing: $root_part"
-    [ -n "${ROOT_UUID:-}" ] || fail "ROOT_UUID was not captured before formatting"
+    [ -n "${DONOR_ROOT_UUID:-}" ] || fail "Donor root UUID was not captured before formatting"
 
-    log "Formatting $root_part as ext4 label=rootfs while preserving UUID=$ROOT_UUID"
-    mkfs.ext4 -F -L rootfs -U "$ROOT_UUID" "$root_part"
+    log "Formatting $root_part as ext4 label=rootfs with a fresh UUID"
+    mkfs.ext4 -F -L rootfs -U random "$root_part"
+    sync
+
+    ROOT_UUID="$(blkid -s UUID -o value "$root_part")"
+    [ -n "$ROOT_UUID" ] || fail "Could not read the freshly generated root UUID from $root_part"
+    [ "$ROOT_UUID" != "$DONOR_ROOT_UUID" ] || \
+        fail "Fresh root UUID unexpectedly matches the donor UUID: $ROOT_UUID"
+
+    log "Donor root UUID: $DONOR_ROOT_UUID"
+    log "Fresh image root UUID: $ROOT_UUID"
 }
 
 copy_debian_rootfs() {
@@ -1634,7 +1649,18 @@ install_minimal_board_fixes() {
     install -d -m 0755 "$MNT_ROOT/etc/systemd/system/multi-user.target.wants"
     install -d -m 0755 "$MNT_ROOT/etc/systemd/timesyncd.conf.d"
     install -d -m 0755 "$MNT_ROOT/usr/local/sbin"
-    install -d -m 0755 "$MNT_ROOT/proc" "$MNT_ROOT/sys" "$MNT_ROOT/dev" "$MNT_ROOT/run" "$MNT_ROOT/tmp"
+    # These directories must exist in the persistent root filesystem itself.
+    # initramfs moves /dev, /proc, /sys and /run into the real root during
+    # switch_root; omitting the mountpoints causes run-init to fail even when
+    # /sbin/init and systemd are otherwise valid.
+    install -d -m 0755 \
+        "$MNT_ROOT/dev" \
+        "$MNT_ROOT/proc" \
+        "$MNT_ROOT/sys" \
+        "$MNT_ROOT/run" \
+        "$MNT_ROOT/tmp" \
+        "$MNT_ROOT/mnt" \
+        "$MNT_ROOT/media"
     chmod 1777 "$MNT_ROOT/tmp"
 
     log "Setting hostname and /etc/hosts: $TARGET_HOSTNAME"
@@ -1649,7 +1675,7 @@ ff02::1 ip6-allnodes
 ff02::2 ip6-allrouters
 EOF
 
-    log "Writing /etc/fstab with preserved official root UUID"
+    log "Writing /etc/fstab with fresh image root UUID: $ROOT_UUID"
     cat > "$MNT_ROOT/etc/fstab" <<EOF
 UUID=$ROOT_UUID / ext4 defaults,noatime 0 1
 tmpfs /tmp tmpfs defaults,nosuid,nodev,mode=1777 0 0
@@ -1874,6 +1900,7 @@ final_check() {
     lsblk -f "$TARGET_DEVICE"
 
     log "Hybrid image complete"
+    log "Fresh partition-3 root UUID: $ROOT_UUID"
     log "Preserved: official Radxa bootloader, config partition, EFI partition, official kernel/initrd/extlinux/DTBs/modules/firmware"
     log "Replaced: partition 3 userspace rootfs with $ROOTFS_DIR"
     log "Next: boot the Cubie A5E and check serial/SSH/Wi-Fi/rsetup. v14x keeps official Radxa rsetup untouched, copies only narrow Radxa payload paths, preserves Debian PID1, validates systemd shared-library linkage, validates runtime /lib/firmware through /lib -> usr/lib, installs PuTTY-safe dialog/whiptail compatibility without wrapping rsetup, and restores u-boot/overlay support for the rsetup Overlays menu."
@@ -1890,7 +1917,7 @@ main() {
     write_official_image
     capture_official_boot_payload
     expand_root_partition
-    format_root_partition_preserving_uuid
+    format_root_partition_with_fresh_uuid
     copy_debian_rootfs
     final_check
 }
