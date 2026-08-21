@@ -469,6 +469,26 @@ validate_aic_cache() {
     return 0
 }
 
+fetch_upstream_history() {
+    log "Fetching upstream history since $UPSTREAM_SINCE for selected backports."
+
+    if run git -C "$KERNEL_DIR" fetch \
+        --no-tags \
+        --shallow-since="$UPSTREAM_SINCE" \
+        origin \
+        master:refs/remotes/origin/master; then
+        return 0
+    fi
+
+    warn "Initial shallow upstream-history fetch failed. Repacking the shallow repository and retrying once."
+    run git -C "$KERNEL_DIR" repack -d
+    run git -C "$KERNEL_DIR" fetch \
+        --no-tags \
+        --shallow-since="$UPSTREAM_SINCE" \
+        origin \
+        master:refs/remotes/origin/master
+}
+
 prepare_kernel_source() {
     local actual_ref
     local kernel_commit
@@ -496,26 +516,13 @@ prepare_kernel_source() {
         origin_matches "$remote_url" "$LINUX_REPOSITORY" ||
             die "Unexpected Linux origin: $remote_url"
 
-        log "Refreshing the declared Linux tag and pinned upstream history."
-        run git -C "$KERNEL_DIR" fetch \
-            --force \
-            origin \
-            "refs/tags/$LINUX_REF:refs/tags/$LINUX_REF"
-
-        run git -C "$KERNEL_DIR" fetch \
-            --no-tags \
-            --shallow-since="$UPSTREAM_SINCE" \
-            origin \
-            master:refs/remotes/origin/master
-
-        kernel_commit="$(git -C "$KERNEL_DIR" rev-parse "$LINUX_REF^{commit}")"
-        [[ "$kernel_commit" == "$LINUX_EXPECTED_COMMIT" ]] ||
-            die "Kernel tag moved: expected $LINUX_EXPECTED_COMMIT, found $kernel_commit"
-
+        # A valid cache is self-contained and pinned by fingerprint, tag commit,
+        # kernel release, and output hashes. Do not make network access a
+        # prerequisite for reusing it.
         if validate_kernel_cache; then
             KERNEL_CACHE_REUSED=1
             KERNEL_TREE_REUSED=1
-            log "Reusing validated kernel tree and compiled outputs."
+            log "Reusing validated kernel tree and compiled outputs without refreshing upstream Git history."
             log "Kernel cache fingerprint: $KERNEL_INPUT_FINGERPRINT"
             return 0
         fi
@@ -559,13 +566,7 @@ prepare_kernel_source() {
     [[ "$kernel_commit" == "$LINUX_EXPECTED_COMMIT" ]] ||
         die "Kernel tag moved: expected $LINUX_EXPECTED_COMMIT, found $kernel_commit"
 
-    log "Fetching upstream history since $UPSTREAM_SINCE for selected backports."
-
-    run git -C "$KERNEL_DIR" fetch \
-        --no-tags \
-        --shallow-since="$UPSTREAM_SINCE" \
-        origin \
-        master:refs/remotes/origin/master
+    fetch_upstream_history
 
     kernel_status="$(git -C "$KERNEL_DIR" status --porcelain)"
 
@@ -648,18 +649,37 @@ prepare_aic_source() {
         die "AIC_REPO exists but is not a Git repository: $AIC_REPO"
     fi
 
-    if [[ ! -d "$AIC_REPO/.git" ]]; then
+    if [[ -d "$AIC_REPO/.git" ]]; then
+        remote_url="$(git -C "$AIC_REPO" remote get-url origin)"
+        origin_matches "$remote_url" "$AIC_REPOSITORY" ||
+            die "Unexpected AIC8800 origin: $remote_url"
+
+        if [[ "$AIC_REBUILD" == "1" ]]; then
+            log "AIC_REBUILD=1; discarding the validated AIC8800 cache."
+            rm -f -- "$AIC_CACHE_STATE"
+        fi
+
+        # As with the kernel cache, a pinned and hash-validated AIC cache must
+        # be reusable without contacting the remote repository.
+        if validate_aic_cache; then
+            AIC_CACHE_REUSED=1
+            log "Reusing validated AIC8800 source state and compiled modules without refreshing origin."
+            log "AIC8800 cache fingerprint: $AIC_INPUT_FINGERPRINT"
+            return 0
+        fi
+
+        warn "AIC8800 cache is absent, stale, forced, or failed validation."
+        log "Refreshing AIC8800 origin because source reconstruction is required."
+        run git -C "$AIC_REPO" fetch \
+            --prune \
+            origin
+    else
         run git clone "$AIC_REPOSITORY" "$AIC_REPO"
+        remote_url="$(git -C "$AIC_REPO" remote get-url origin)"
+        origin_matches "$remote_url" "$AIC_REPOSITORY" ||
+            die "Unexpected AIC8800 origin: $remote_url"
+        warn "AIC8800 cache is absent; preparing source from the declared pin."
     fi
-
-    remote_url="$(git -C "$AIC_REPO" remote get-url origin)"
-
-    origin_matches "$remote_url" "$AIC_REPOSITORY" ||
-        die "Unexpected AIC8800 origin: $remote_url"
-
-    run git -C "$AIC_REPO" fetch \
-        --prune \
-        origin
 
     requested_ref="$AIC_REF"
 
@@ -699,25 +719,14 @@ prepare_aic_source() {
     [[ "$aic_commit" == "$AIC_EXPECTED_COMMIT" ]] ||
         die "AIC8800 ref moved: expected $AIC_EXPECTED_COMMIT, found $aic_commit"
 
-    if [[ "$AIC_REBUILD" == "1" ]]; then
-        log "AIC_REBUILD=1; discarding the validated AIC8800 cache."
-        rm -f -- "$AIC_CACHE_STATE"
-    fi
-
-    if validate_aic_cache; then
-        AIC_CACHE_REUSED=1
-        log "Reusing validated AIC8800 source state and compiled modules."
-        log "AIC8800 cache fingerprint: $AIC_INPUT_FINGERPRINT"
-        return 0
-    fi
-
-    warn "AIC8800 cache is absent, stale, forced, or failed validation."
     log "Resetting AIC8800 source to the declared pin."
     run git -C "$AIC_REPO" reset --hard "$selected_ref"
     run git -C "$AIC_REPO" clean -ffdx
     rm -f -- "$AIC_CACHE_STATE"
 
     aic_commit="$(git -C "$AIC_REPO" rev-parse HEAD)"
+    [[ "$aic_commit" == "$AIC_EXPECTED_COMMIT" ]] ||
+        die "AIC8800 reset produced unexpected commit: $aic_commit"
 
     aic_status="$(git -C "$AIC_REPO" status --porcelain)"
 
