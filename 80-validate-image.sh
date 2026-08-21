@@ -1318,6 +1318,10 @@ grep -Fq 'TARGET_DISK_SIZE >= SOURCE_DISK_SIZE' "$nvme_installer" ||
     die "NVMe installer lacks the guarded target-capacity check."
 grep -Fq 'iflag=count_bytes' "$nvme_installer" ||
     die "NVMe installer does not preserve the Radxa pre-root boot-chain area."
+grep -Fq 'sgdisk -A 3:set:2 "$TARGET_DISK"' "$nvme_installer" ||
+    die "NVMe installer does not restore the partition-3 GPT bootable attribute required by SPI U-Boot."
+grep -Fq 'Target partition 3 is missing the GPT legacy bootable attribute required by SPI U-Boot.' "$nvme_installer" ||
+    die "NVMe installer lacks post-partitioning bootable-attribute validation."
 grep -Fq 'sgdisk -G "$TARGET_DISK"' "$nvme_installer" ||
     die "NVMe installer does not regenerate GPT identifiers on the target."
 grep -Fq 'mkfs.ext4 -F -L rootfs -U random' "$nvme_installer" ||
