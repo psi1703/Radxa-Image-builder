@@ -12,6 +12,10 @@ readonly TARGET_ROOT_MNT="$WORK_DIR/root"
 readonly STATUS_FILE_REL="/var/lib/cubie-a5e/nvme-install.status"
 readonly ROOT_GROW_MARKER_REL="/var/lib/cubie-a5e/rootfs-expanded"
 readonly EXPECTED_EXTLINUX_REL="boot/extlinux/extlinux.conf"
+readonly EXPECTED_SPI_FREQUENCY="20000000"
+readonly SPI_MTD_DEVICE="/dev/mtd0"
+readonly RADXA_UBOOT_PAYLOAD_DIR="/usr/lib/u-boot/radxa-cubie-a5e"
+readonly MINIMUM_UBOOT_VERSION="2018.07-17"
 
 TUI_MODE=0
 REQUESTED_TARGET=""
@@ -99,7 +103,10 @@ self_test() {
         date
         dd
         dirname
+        dpkg
+        dpkg-query
         e2fsck
+        fdtget
         findmnt
         flock
         grep
@@ -119,6 +126,8 @@ self_test() {
         sed
         sgdisk
         sort
+        stat
+        strings
         sudo
         swapon
         sync
@@ -141,6 +150,11 @@ self_test() {
 
     [[ -s "$LAYOUT_FILE" ]] || {
         printf '%s self-test: missing layout file: %s\n' "$PROGRAM_NAME" "$LAYOUT_FILE" >&2
+        return 1
+    }
+
+    [[ -x "$RADXA_UBOOT_PAYLOAD_DIR/setup.sh" ]] || {
+        printf '%s self-test: missing Radxa U-Boot backend: %s/setup.sh\n' "$PROGRAM_NAME" "$RADXA_UBOOT_PAYLOAD_DIR" >&2
         return 1
     }
 
@@ -273,8 +287,101 @@ validate_source_runtime() {
     grep -Fxq 'pcie_sunxi_host' /etc/initramfs-tools/modules ||
         die "Source initramfs policy lacks pcie_sunxi_host."
 
+    validate_runtime_root_layout "/" "Source"
+    validate_source_spi_dtb
+
     [[ ! -e /var/lib/cubie-a5e-update/pending.env ]] ||
         die "A managed kernel/board update is pending. Reboot/finalize it before NVMe migration."
+}
+
+validate_runtime_root_layout() {
+    local root="$1"
+    local label="$2"
+    local directory
+    local path
+    local tmp_mode
+
+    root="${root%/}"
+    [[ -n "$root" ]] || root="/"
+
+    for directory in dev proc sys run tmp mnt media; do
+        if [[ "$root" == "/" ]]; then
+            path="/$directory"
+        else
+            path="$root/$directory"
+        fi
+        [[ -d "$path" ]] || die "$label root filesystem is missing required runtime directory: /$directory"
+    done
+
+    if [[ "$root" == "/" ]]; then
+        tmp_mode="$(stat -c '%a' /tmp)"
+        [[ -x /sbin/init ]] || die "$label root filesystem lacks executable /sbin/init."
+        [[ -x /usr/lib/systemd/systemd ]] || die "$label root filesystem lacks executable /usr/lib/systemd/systemd."
+    else
+        tmp_mode="$(stat -c '%a' "$root/tmp")"
+        [[ -x "$root/sbin/init" ]] || die "$label root filesystem lacks executable /sbin/init."
+        [[ -x "$root/usr/lib/systemd/systemd" ]] || die "$label root filesystem lacks executable /usr/lib/systemd/systemd."
+    fi
+
+    [[ "$tmp_mode" == "1777" ]] || die "$label /tmp mode is $tmp_mode; expected 1777."
+}
+
+normalize_target_runtime_layout() {
+    install -d -m 0755 -- \
+        "$TARGET_ROOT_MNT/dev" \
+        "$TARGET_ROOT_MNT/proc" \
+        "$TARGET_ROOT_MNT/sys" \
+        "$TARGET_ROOT_MNT/run" \
+        "$TARGET_ROOT_MNT/mnt" \
+        "$TARGET_ROOT_MNT/media"
+    install -d -m 1777 -- "$TARGET_ROOT_MNT/tmp"
+}
+
+validate_source_spi_dtb() {
+    local active_kernel
+    local dtb
+    local frequency
+
+    active_kernel="$(uname -r)"
+    dtb="/usr/lib/linux-image-$active_kernel/allwinner/sun55i-a527-cubie-a5e.dtb"
+    [[ -s "$dtb" ]] || die "Running managed Cubie A5E DTB is missing for SPI validation: $dtb"
+
+    frequency="$(fdtget -t u "$dtb" /soc/spi@4025000/flash@0 spi-max-frequency 2>/dev/null || true)"
+    [[ "$frequency" == "$EXPECTED_SPI_FREQUENCY" ]] ||
+        die "Running DTB SPI-NOR frequency is ${frequency:-missing}; expected field-validated ${EXPECTED_SPI_FREQUENCY} Hz."
+}
+
+validate_spi_bootloader() {
+    local aw2501_version
+    local board_version
+    local expected_marker
+
+    [[ -c "$SPI_MTD_DEVICE" ]] ||
+        die "SPI NOR device $SPI_MTD_DEVICE is unavailable. The image must expose the 16 MiB Cubie A5E SPI NOR before NVMe migration."
+
+    [[ -x /usr/sbin/flashcp ]] || die "mtd-utils flashcp is missing."
+    [[ -x /usr/sbin/flash_erase ]] || die "mtd-utils flash_erase is missing."
+    [[ -x "$RADXA_UBOOT_PAYLOAD_DIR/setup.sh" ]] ||
+        die "Radxa Cubie A5E SPI update backend is missing: $RADXA_UBOOT_PAYLOAD_DIR/setup.sh"
+
+    aw2501_version="$(dpkg-query -W -f='${Version}' u-boot-aw2501 2>/dev/null || true)"
+    board_version="$(dpkg-query -W -f='${Version}' u-boot-radxa-cubie-a5e 2>/dev/null || true)"
+    [[ -n "$aw2501_version" ]] || die "u-boot-aw2501 is not installed."
+    [[ -n "$board_version" ]] || die "u-boot-radxa-cubie-a5e is not installed."
+    [[ "$aw2501_version" == "$board_version" ]] ||
+        die "Radxa U-Boot package versions differ: aw2501=$aw2501_version board=$board_version"
+
+    dpkg --compare-versions "$aw2501_version" ge "$MINIMUM_UBOOT_VERSION" ||
+        die "Installed Radxa U-Boot $aw2501_version is older than the validated minimum $MINIMUM_UBOOT_VERSION."
+
+    expected_marker="U-Boot ${aw2501_version}-boot-aw2501-"
+    if ! dd if="$SPI_MTD_DEVICE" bs=1M count=2 status=none 2>/dev/null |
+        strings |
+        grep -Fq -- "$expected_marker"; then
+        die "On-board SPI firmware does not contain the installed Cubie A5E U-Boot $aw2501_version. Update the SPI bootloader through rsetup before NVMe migration."
+    fi
+
+    log "Validated on-board SPI U-Boot $aw2501_version for standalone NVMe boot."
 }
 
 candidate_nvme_disks() {
@@ -478,8 +585,18 @@ prepare_target_partition_table() {
         -t 3:8300 \
         -c 3:rootfs \
         "$TARGET_DISK" >/dev/null
+
+    # Radxa SPI U-Boot scans bootable GPT partitions. Recreating partition 3
+    # clears the donor's legacy bootable attribute, so restore GPT attribute
+    # bit 2 explicitly before regenerating target GUIDs.
+    sgdisk -A 3:set:2 "$TARGET_DISK" >/dev/null
+
     sgdisk -G "$TARGET_DISK" >/dev/null
     sgdisk -v "$TARGET_DISK" >/dev/null 2>&1 || die "Target GPT validation failed after recreation."
+
+    sgdisk -i 3 "$TARGET_DISK" |
+        grep -Eq '^Attribute flags:[[:space:]]+[0-9A-Fa-f]{15}[4567cCdDeEfF]$' ||
+        die "Target partition 3 is missing the GPT legacy bootable attribute required by SPI U-Boot."
 
     partprobe "$TARGET_DISK"
     udevadm settle
@@ -515,13 +632,13 @@ rsync_root_pass() {
         --numeric-ids \
         --delete-delay \
         --info=progress2 \
-        --exclude='/dev/***' \
-        --exclude='/proc/***' \
-        --exclude='/run/***' \
-        --exclude='/sys/***' \
-        --exclude='/tmp/***' \
-        --exclude='/mnt/***' \
-        --exclude='/media/***' \
+        --exclude='/dev/*' \
+        --exclude='/proc/*' \
+        --exclude='/run/*' \
+        --exclude='/sys/*' \
+        --exclude='/tmp/*' \
+        --exclude='/mnt/*' \
+        --exclude='/media/*' \
         --exclude='/lost+found' \
         / \
         "$TARGET_ROOT_MNT/"
@@ -534,6 +651,7 @@ copy_running_system() {
 
     log "Refreshing changed files on NVMe (pass 2 of 2)."
     rsync_root_pass
+    normalize_target_runtime_layout
     sync
 }
 
@@ -651,6 +769,14 @@ validate_target_filesystem() {
     [[ -s "$TARGET_ROOT_MNT/usr/lib/linux-image-$active_kernel/allwinner/sun55i-a527-cubie-a5e.dtb" ]] ||
         die "Target Cubie A5E DTB is missing for $active_kernel"
 
+    [[ "$(fdtget -t u \
+        "$TARGET_ROOT_MNT/usr/lib/linux-image-$active_kernel/allwinner/sun55i-a527-cubie-a5e.dtb" \
+        /soc/spi@4025000/flash@0 spi-max-frequency 2>/dev/null || true)" == \
+       "$EXPECTED_SPI_FREQUENCY" ]] ||
+        die "Target DTB does not retain the field-validated 20 MHz SPI-NOR frequency."
+
+    validate_runtime_root_layout "$TARGET_ROOT_MNT" "Target"
+
     grep -Fxq 'default cubie-a5e' "$extlinux" || die "Target extlinux default is not cubie-a5e."
     grep -Fxq 'label cubie-a5e' "$extlinux" || die "Target managed extlinux entry is missing."
     grep -Fq "linux /boot/vmlinuz-$active_kernel" "$extlinux" ||
@@ -706,13 +832,13 @@ finish_target() {
 show_success() {
     local message
 
-    message="NVMe installation completed successfully.\n\nTarget: $TARGET_DISK\nRoot UUID: $TARGET_ROOT_UUID\n\nPower the Cubie A5E off completely, remove the microSD card, then boot again.\n\nIf standalone NVMe boot does not start, install/update the Cubie A5E SPI boot firmware from the Radxa system configuration menu, then retry."
+    message="NVMe installation completed successfully.\n\nTarget: $TARGET_DISK\nRoot UUID: $TARGET_ROOT_UUID\n\nThe running 20 MHz SPI-NOR DTB and on-board Radxa SPI U-Boot were validated before installation.\n\nPower the Cubie A5E off completely, remove the microSD card, then boot again."
 
     log "NVMe installation completed successfully."
     log "Target: $TARGET_DISK"
     log "NVMe root UUID: $TARGET_ROOT_UUID"
+    log "SPI/U-Boot preflight: PASS"
     log "Next: power off, remove the microSD card, and boot again."
-    warn "If NVMe does not boot standalone, install/update the Cubie A5E SPI boot firmware through Radxa rsetup."
 
     if ((TUI_MODE == 1)); then
         whiptail --title "Cubie A5E NVMe installer" --msgbox "$message" 18 86
@@ -723,6 +849,7 @@ install_to_nvme() {
     load_managed_layout
     discover_source
     validate_source_runtime
+    validate_spi_bootloader
 
     if ((TUI_MODE == 1)); then
         select_target_tui
@@ -741,8 +868,8 @@ install_to_nvme() {
     rewrite_target_fstab
     rewrite_target_extlinux
     rewrite_target_layout
-    write_target_markers
     validate_target_filesystem
+    write_target_markers
     finish_target
     show_success
 }
@@ -758,7 +885,10 @@ main() {
         date
         dd
         dirname
+        dpkg
+        dpkg-query
         e2fsck
+        fdtget
         findmnt
         flock
         grep
@@ -778,6 +908,8 @@ main() {
         sed
         sgdisk
         sort
+        stat
+        strings
         swapon
         sync
         tr
