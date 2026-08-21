@@ -107,7 +107,7 @@ validate_backport() {
         die "Cubie A5E SPI-NOR node is missing."
     grep -qF 'compatible = "jedec,spi-nor";' "$BOARD_DTS" ||
         die "Cubie A5E SPI-NOR compatible is missing."
-    grep -qF 'spi-max-frequency = <50000000>;' "$BOARD_DTS" ||
+    grep -qF 'spi-max-frequency = <20000000>;' "$BOARD_DTS" ||
         die "Cubie A5E SPI-NOR frequency is incorrect."
 }
 
