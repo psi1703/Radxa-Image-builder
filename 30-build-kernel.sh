@@ -464,7 +464,7 @@ validate_board_dtb() {
     [[ "$(fdtget -t u \
         "$BOARD_DTB" \
         /soc/spi@4025000/flash@0 \
-        spi-max-frequency)" == "50000000" ]] ||
+        spi-max-frequency)" == "20000000" ]] ||
         die "Compiled board DTB has the wrong SPI-NOR frequency."
 
     grep -qF 'regulator-name = "3v3-wifi";' "$decompiled_dts" ||
@@ -584,7 +584,7 @@ write_reports() {
         printf 'NVMe host driver: built in\n'
         printf 'A523 SPI0 controller driver: built in\n'
         printf 'SPI-NOR framework: built in\n'
-        printf 'Cubie A5E SPI-NOR maximum frequency: 50000000 Hz\n'
+        printf 'Cubie A5E SPI-NOR maximum frequency: 20000000 Hz\n'
         printf 'Wi-Fi power sequence: PM1 reset with 200 ms delay\n'
         printf 'MMC power-sequence reset routing: explicit resets property; reset-gpios use GPIO consumer path\n'
         printf 'Wi-Fi I/O supply: BLDO1 at 1.8 V, always on\n'
