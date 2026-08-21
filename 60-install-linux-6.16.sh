@@ -258,7 +258,12 @@ log "Installing the official Radxa Cubie A5E U-Boot maintenance payload $RADXA_U
 run_arm64_chroot "
     set -Eeuo pipefail
     export DEBIAN_FRONTEND=noninteractive
-    dpkg -i '$target_common' '$target_board'
+    dpkg \
+        --force-confdef \
+        --force-confold \
+        -i \
+        '$target_common' \
+        '$target_board'
 "
 
 rm -f -- "$ROOT_MNT$target_common" "$ROOT_MNT$target_board"
@@ -1949,8 +1954,8 @@ grep -Fxq 'CONSOLE_LOGIN=prompt' \
 validate_rsetup_runtime() {
 local nvme_smoke_output
 local nvme_smoke_status
-local product_id
-local setup_script
+local hwid_module="$ROOT_MNT/usr/lib/rsetup/mod/hwid.sh"
+local setup_module="$ROOT_MNT/usr/lib/rsetup/mod/get_setup_script.sh"
 local smoke_output
 local smoke_status
 local status_file="$ROOT_MNT/var/lib/cubie-a5e/rsetup-self-test.status"
@@ -1975,17 +1980,23 @@ fi
 grep -Fxq 'cubie-a5e-install-nvme self-test: PASS' <<<"$nvme_smoke_output" ||
     die "Installed NVMe installer self-test did not report PASS."
 
-product_id="$(
-    run_arm64_chroot         'source /usr/lib/rsetup/mod/hwid.sh; get_product_id'
-)"
-[[ "$product_id" == "radxa-cubie-a5e" ]] ||
-    die "Radxa rsetup product ID mismatch: ${product_id:-missing}"
+# Do not execute Radxa hardware-ID discovery inside the image-build chroot.
+# The chroot is bound to the build host's /proc and /sys, so get_product_id
+# cannot see the Cubie A5E device tree and will correctly return no board ID.
+# Instead, validate the installed rsetup source chain and the board-specific
+# U-Boot backend payload statically. Real hardware-ID discovery is exercised
+# after boot on the Cubie A5E itself.
+require_nonempty_file "$hwid_module"
+require_nonempty_file "$setup_module"
 
-setup_script="$(
-    run_arm64_chroot         'source /usr/lib/rsetup/mod/hwid.sh; source /usr/lib/rsetup/mod/get_setup_script.sh; get_setup_script'
-)"
-[[ "$setup_script" == "$RADXA_UBOOT_PAYLOAD_DIR/setup.sh" ]] ||
-    die "Radxa rsetup bootloader backend mismatch: ${setup_script:-missing}"
+grep -qF 'get_product_id' "$hwid_module" ||
+    die "Installed rsetup hardware-ID module does not provide get_product_id."
+grep -qF 'get_setup_script' "$setup_module" ||
+    die "Installed rsetup bootloader backend module does not provide get_setup_script."
+[[ -x "$ROOT_MNT$RADXA_UBOOT_PAYLOAD_DIR/setup.sh" ]] ||
+    die "Installed Cubie A5E U-Boot setup backend is missing or not executable."
+
+log "rsetup hardware-ID execution skipped in build chroot; source chain and Cubie A5E U-Boot backend payload validated statically."
 
 log "Running the installed rsetup dependency and source-chain smoke test."
 
@@ -2506,7 +2517,7 @@ printf 'Managed Cubie A5E entry default: yes\n'
 }
 
 main() {
-log "Stage 60 revision: spi-maintenance-nvme-guard-v2-20260821"
+log "Stage 60 revision: spi-maintenance-nvme-guard-v3-20260821"
 require_command awk
 require_command blkid
 require_command chroot
