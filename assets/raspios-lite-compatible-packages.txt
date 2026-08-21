@@ -3,6 +3,10 @@
 #
 # Raspberry Pi-specific kernel, firmware, EEPROM, GPIO backend, camera,
 # raspi-config and rpi-connect packages are intentionally excluded.
+#
+# mkvtoolnix is intentionally excluded on Cubie A5E. It is not required for
+# this headless image and its package hooks emit unnecessary update-alternatives
+# diagnostics for mkvinfo during the offline Stage 60 chroot installation.
 
 apt-listchanges
 avahi-daemon
@@ -29,7 +33,6 @@ lua5.1
 luajit
 man-db
 manpages-dev
-mkvtoolnix
 nano
 ncdu
 ntfs-3g
