@@ -19,7 +19,7 @@ readonly SPI_DRIVER="$KERNEL_DIR/drivers/spi/spi-sun6i.c"
 readonly SOC_DTSI="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a523.dtsi"
 readonly BOARD_DTS="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dts"
 readonly SPI_STAMP="$KERNEL_DIR/.cubie-a5e-a523-spi-backport"
-readonly SPI_REVISION="a523-spi-mainline-backport-v2-no-dma"
+readonly SPI_REVISION="a523-spi-mainline-backport-v3-pio-spi-nor-20mhz"
 
 if [[ -n "${LOG_DIR:-}" ]]; then
     mkdir -p -- "$LOG_DIR"
@@ -121,6 +121,7 @@ completed_backport_available() {
     grep -qF 'spi0: spi@4025000 {' "$SOC_DTSI" || return 1
     grep -qF '&spi0 {' "$BOARD_DTS" || return 1
     grep -qF 'compatible = "jedec,spi-nor";' "$BOARD_DTS" || return 1
+    grep -qF 'spi-max-frequency = <20000000>;' "$BOARD_DTS" || return 1
     spi0_has_no_dma_properties || return 1
     return 0
 }
@@ -272,7 +273,8 @@ else:
 write(soc_path, soc)
 
 board = read(board_path)
-if re.search(r"^&spi0\s*\{", board, flags=re.MULTILINE) is None:
+board_spi_span = node_span(board, r"^&spi0\s*\{")
+if board_spi_span is None:
     board += """
 
 &spi0 {
@@ -283,10 +285,44 @@ if re.search(r"^&spi0\s*\{", board, flags=re.MULTILINE) is None:
 \tflash@0 {
 \t\tcompatible = "jedec,spi-nor";
 \t\treg = <0>;
-\t\tspi-max-frequency = <50000000>;
+\t\tspi-max-frequency = <20000000>;
 \t};
 };
 """
+else:
+    start, end = board_spi_span
+    spi_node = board[start:end]
+    flash_span = node_span(spi_node, r"^[ \t]*flash@0\s*\{")
+    if flash_span is None:
+        closing = spi_node.rfind("};")
+        if closing < 0:
+            raise SystemExit("SPI backport: Cubie A5E SPI0 node closing brace is missing")
+        flash_node = (
+            "\n\tflash@0 {\n"
+            "\t\tcompatible = \"jedec,spi-nor\";\n"
+            "\t\treg = <0>;\n"
+            "\t\tspi-max-frequency = <20000000>;\n"
+            "\t};\n"
+        )
+        spi_node = spi_node[:closing] + flash_node + spi_node[closing:]
+    else:
+        flash_start, flash_end = flash_span
+        flash_node = spi_node[flash_start:flash_end]
+        if re.search(r"^[ \t]*spi-max-frequency\s*=", flash_node, flags=re.MULTILINE):
+            flash_node = re.sub(
+                r"^([ \t]*spi-max-frequency\s*=\s*)<[^>]+>;",
+                r"\g<1><20000000>;",
+                flash_node,
+                count=1,
+                flags=re.MULTILINE,
+            )
+        else:
+            close = flash_node.rfind("};")
+            if close < 0:
+                raise SystemExit("SPI backport: Cubie A5E SPI-NOR node closing brace is missing")
+            flash_node = flash_node[:close] + "\t\tspi-max-frequency = <20000000>;\n" + flash_node[close:]
+        spi_node = spi_node[:flash_start] + flash_node + spi_node[flash_end:]
+    board = board[:start] + spi_node + board[end:]
 
 write(board_path, board)
 PY
@@ -308,7 +344,7 @@ write_report() {
         printf 'SPI0 CS0 pin: PC3\n'
         printf 'SPI0 pinmux: 4\n'
         printf 'SPI-NOR compatible: jedec,spi-nor\n'
-        printf 'SPI-NOR maximum frequency: 50000000\n'
+        printf 'SPI-NOR maximum frequency: 20000000\n'
         printf 'Driver: %s\n' "$SPI_DRIVER"
         printf 'SoC DTSI: %s\n' "$SOC_DTSI"
         printf 'Board DTS: %s\n' "$BOARD_DTS"
