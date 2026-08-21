@@ -53,6 +53,25 @@ readonly PCIE_MODULE_REL="kernel/drivers/pci/controller/sunxi/pcie_sunxi_host.ko
 readonly PCIE_PHY_MODULE_REL="kernel/drivers/phy/allwinner/phy-sunxi-inno-combophy.ko"
 readonly PCIE_INITRAMFS_STATUS="/var/lib/cubie-a5e/pcie-initramfs.status"
 
+# Radxa does not currently publish the Cubie A5E AW2501 U-Boot packages in the
+# Trixie repository. Keep the known-good board release pinned here, while
+# allowing config/source-pins.env to override the values for a future reviewed
+# vendor release without another Stage 60 rewrite.
+readonly RADXA_UBOOT_VERSION="${RADXA_UBOOT_VERSION:-2018.07-17}"
+readonly RADXA_UBOOT_RELEASE_BASE="${RADXA_UBOOT_RELEASE_BASE:-https://github.com/radxa-pkg/u-boot-aw2501/releases/download/$RADXA_UBOOT_VERSION}"
+readonly RADXA_UBOOT_COMMON_PACKAGE="u-boot-aw2501"
+readonly RADXA_UBOOT_BOARD_PACKAGE="u-boot-radxa-cubie-a5e"
+readonly RADXA_UBOOT_COMMON_DEB="${RADXA_UBOOT_COMMON_PACKAGE}_${RADXA_UBOOT_VERSION}_all.deb"
+readonly RADXA_UBOOT_BOARD_DEB="${RADXA_UBOOT_BOARD_PACKAGE}_${RADXA_UBOOT_VERSION}_all.deb"
+readonly RADXA_UBOOT_COMMON_URL="${RADXA_UBOOT_COMMON_URL:-$RADXA_UBOOT_RELEASE_BASE/$RADXA_UBOOT_COMMON_DEB}"
+readonly RADXA_UBOOT_BOARD_URL="${RADXA_UBOOT_BOARD_URL:-$RADXA_UBOOT_RELEASE_BASE/$RADXA_UBOOT_BOARD_DEB}"
+readonly RADXA_UBOOT_COMMON_SHA256="${RADXA_UBOOT_COMMON_SHA256:-}"
+readonly RADXA_UBOOT_BOARD_SHA256="${RADXA_UBOOT_BOARD_SHA256:-}"
+readonly RADXA_UBOOT_DOWNLOAD_DIR="$BUILD_ROOT/downloads/radxa-u-boot/$RADXA_UBOOT_VERSION"
+readonly RADXA_UBOOT_COMMON_PATH="$RADXA_UBOOT_DOWNLOAD_DIR/$RADXA_UBOOT_COMMON_DEB"
+readonly RADXA_UBOOT_BOARD_PATH="$RADXA_UBOOT_DOWNLOAD_DIR/$RADXA_UBOOT_BOARD_DEB"
+readonly RADXA_UBOOT_PAYLOAD_DIR="/usr/lib/u-boot/radxa-cubie-a5e"
+
 readonly ROOT_MNT="${ROOT_MNT:-$BUILD_ROOT/mnt/one-shot-root}"
 readonly DEFAULT_BOOT_MNT="${BOOT_MNT:-$BUILD_ROOT/mnt/one-shot-boot}"
 readonly INITBOX_PASSWORD_FILE="$ROOT_MNT/tmp/.cubie-a5e-initbox-password"
@@ -60,7 +79,7 @@ readonly INITBOX_PASSWORD_FILE="$ROOT_MNT/tmp/.cubie-a5e-initbox-password"
 readonly RESOLVER_BACKUP="$BUILD_ROOT/.one-shot-resolv.conf.backup"
 readonly RESOLVER_LINK_FILE="$BUILD_ROOT/.one-shot-resolv.conf.link"
 
-readonly RUNTIME_CACHE_SCHEMA="stage60-runtime-rootfs-v1"
+readonly RUNTIME_CACHE_SCHEMA="stage60-runtime-rootfs-v2-spi-maintenance"
 readonly RUNTIME_CACHE_MAX_AGE_SECONDS="${RUNTIME_CACHE_MAX_AGE_SECONDS:-86400}"
 readonly RUNTIME_CACHE_REBUILD="${RUNTIME_CACHE_REBUILD:-0}"
 readonly RUNTIME_CACHE_DIR="$BUILD_ROOT/cache/stage60-runtime-rootfs"
@@ -107,6 +126,143 @@ local path="$1"
 [[ -s "$path" ]] ||
     die "Required file is missing or empty: $path"
 
+}
+
+validate_radxa_uboot_deb() {
+local path="$1"
+local expected_package="$2"
+local expected_sha256="$3"
+local package_name
+local package_version
+local actual_sha256
+
+require_nonempty_file "$path"
+
+package_name="$(dpkg-deb -f "$path" Package)"
+package_version="$(dpkg-deb -f "$path" Version)"
+
+[[ "$package_name" == "$expected_package" ]] ||
+    die "Unexpected Radxa U-Boot package in $path: $package_name"
+[[ "$package_version" == "$RADXA_UBOOT_VERSION" ]] ||
+    die "Unexpected Radxa U-Boot version in $path: $package_version expected=$RADXA_UBOOT_VERSION"
+
+if [[ -n "$expected_sha256" ]]; then
+    [[ "$expected_sha256" =~ ^[0-9a-fA-F]{64}$ ]] ||
+        die "Invalid SHA256 pin for $expected_package: $expected_sha256"
+
+    actual_sha256="$(sha256sum "$path" | awk '{print $1}')"
+    [[ "${actual_sha256,,}" == "${expected_sha256,,}" ]] ||
+        die "SHA256 mismatch for $expected_package: actual=$actual_sha256 expected=$expected_sha256"
+fi
+}
+
+download_radxa_uboot_deb() {
+local url="$1"
+local destination="$2"
+local expected_package="$3"
+local expected_sha256="$4"
+local temporary
+
+install -d -m 0755 -- "$RADXA_UBOOT_DOWNLOAD_DIR"
+
+if [[ -s "$destination" ]] &&
+   validate_radxa_uboot_deb "$destination" "$expected_package" "$expected_sha256"; then
+    log "Using cached Radxa U-Boot package: $destination"
+    return 0
+fi
+
+rm -f -- "$destination"
+temporary="$(mktemp "$RADXA_UBOOT_DOWNLOAD_DIR/.${expected_package}.XXXXXX")"
+
+log "Downloading Radxa $expected_package $RADXA_UBOOT_VERSION."
+if ! wget     --https-only     --tries=3     --timeout=30     --output-document="$temporary"     "$url"; then
+    rm -f -- "$temporary"
+    die "Failed to download Radxa U-Boot package: $url"
+fi
+
+validate_radxa_uboot_deb "$temporary" "$expected_package" "$expected_sha256"
+chmod 0644 "$temporary"
+mv -f -- "$temporary" "$destination"
+}
+
+prepare_radxa_uboot_packages() {
+[[ "$RADXA_UBOOT_VERSION" =~ ^[0-9A-Za-z._+-]+$ ]] ||
+    die "Invalid Radxa U-Boot version: $RADXA_UBOOT_VERSION"
+
+case "$RADXA_UBOOT_COMMON_URL" in
+    https://github.com/radxa-pkg/u-boot-aw2501/releases/download/*) ;;
+    *) die "Unexpected Radxa U-Boot common package URL: $RADXA_UBOOT_COMMON_URL" ;;
+esac
+case "$RADXA_UBOOT_BOARD_URL" in
+    https://github.com/radxa-pkg/u-boot-aw2501/releases/download/*) ;;
+    *) die "Unexpected Radxa U-Boot board package URL: $RADXA_UBOOT_BOARD_URL" ;;
+esac
+
+download_radxa_uboot_deb     "$RADXA_UBOOT_COMMON_URL"     "$RADXA_UBOOT_COMMON_PATH"     "$RADXA_UBOOT_COMMON_PACKAGE"     "$RADXA_UBOOT_COMMON_SHA256"
+
+download_radxa_uboot_deb     "$RADXA_UBOOT_BOARD_URL"     "$RADXA_UBOOT_BOARD_PATH"     "$RADXA_UBOOT_BOARD_PACKAGE"     "$RADXA_UBOOT_BOARD_SHA256"
+}
+
+validate_radxa_uboot_runtime() {
+local payload_root="$ROOT_MNT$RADXA_UBOOT_PAYLOAD_DIR"
+local common_status
+local common_version
+local board_status
+local board_version
+
+require_nonempty_file "$payload_root/boot0_spinor.bin"
+require_nonempty_file "$payload_root/boot_package.fex"
+require_nonempty_file "$payload_root/sys_partition_nor.bin"
+require_nonempty_file "$payload_root/setup.sh"
+[[ -x "$payload_root/setup.sh" ]] ||
+    die "Cubie A5E Radxa U-Boot setup backend is not executable."
+
+[[ -x "$ROOT_MNT/usr/sbin/flashcp" ]] ||
+    die "mtd-utils flashcp is missing from the target runtime."
+[[ -x "$ROOT_MNT/usr/sbin/flash_erase" ]] ||
+    die "mtd-utils flash_erase is missing from the target runtime."
+
+common_status="$(
+    run_arm64_chroot         "dpkg-query -W -f='\${db:Status-Abbrev}' '$RADXA_UBOOT_COMMON_PACKAGE'"
+)"
+common_version="$(
+    run_arm64_chroot         "dpkg-query -W -f='\${Version}' '$RADXA_UBOOT_COMMON_PACKAGE'"
+)"
+board_status="$(
+    run_arm64_chroot         "dpkg-query -W -f='\${db:Status-Abbrev}' '$RADXA_UBOOT_BOARD_PACKAGE'"
+)"
+board_version="$(
+    run_arm64_chroot         "dpkg-query -W -f='\${Version}' '$RADXA_UBOOT_BOARD_PACKAGE'"
+)"
+
+[[ "$common_status" == "ii " ]] ||
+    die "Required Radxa U-Boot package is not fully installed: $RADXA_UBOOT_COMMON_PACKAGE status=<$common_status>"
+[[ "$board_status" == "ii " ]] ||
+    die "Required Radxa U-Boot package is not fully installed: $RADXA_UBOOT_BOARD_PACKAGE status=<$board_status>"
+[[ "$common_version" == "$RADXA_UBOOT_VERSION" ]] ||
+    die "Unexpected Radxa U-Boot package version: $RADXA_UBOOT_COMMON_PACKAGE=$common_version expected=$RADXA_UBOOT_VERSION"
+[[ "$board_version" == "$RADXA_UBOOT_VERSION" ]] ||
+    die "Unexpected Radxa U-Boot package version: $RADXA_UBOOT_BOARD_PACKAGE=$board_version expected=$RADXA_UBOOT_VERSION"
+}
+
+install_radxa_uboot_runtime() {
+local target_common="/tmp/$RADXA_UBOOT_COMMON_DEB"
+local target_board="/tmp/$RADXA_UBOOT_BOARD_DEB"
+
+prepare_radxa_uboot_packages
+
+install -D -m 0644     "$RADXA_UBOOT_COMMON_PATH"     "$ROOT_MNT$target_common"
+install -D -m 0644     "$RADXA_UBOOT_BOARD_PATH"     "$ROOT_MNT$target_board"
+
+log "Installing the official Radxa Cubie A5E U-Boot maintenance payload $RADXA_UBOOT_VERSION."
+run_arm64_chroot "
+    set -Eeuo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    dpkg -i '$target_common' '$target_board'
+"
+
+rm -f -- "$ROOT_MNT$target_common" "$ROOT_MNT$target_board"
+validate_radxa_uboot_runtime
 }
 
 module_vermagic() {
@@ -783,6 +939,11 @@ local relative_path
 
 {
     printf 'schema\t%s\n' "$RUNTIME_CACHE_SCHEMA"
+    printf 'radxa-uboot-version\t%s\n' "$RADXA_UBOOT_VERSION"
+    printf 'radxa-uboot-common-url\t%s\n' "$RADXA_UBOOT_COMMON_URL"
+    printf 'radxa-uboot-board-url\t%s\n' "$RADXA_UBOOT_BOARD_URL"
+    printf 'radxa-uboot-common-sha256\t%s\n' "$RADXA_UBOOT_COMMON_SHA256"
+    printf 'radxa-uboot-board-sha256\t%s\n' "$RADXA_UBOOT_BOARD_SHA256"
     print_runtime_cache_file_digest \
         stage-script \
         "${BASH_SOURCE[0]}"
@@ -860,6 +1021,12 @@ local candidate
 [[ -s "$cache_root/usr/share/bash-completion/bash_completion" ]] || return 1
 [[ -x "$cache_root/usr/sbin/update-initramfs" ]] || return 1
 [[ -x "$cache_root/usr/bin/unmkinitramfs" ]] || return 1
+[[ -x "$cache_root/usr/sbin/flashcp" ]] || return 1
+[[ -x "$cache_root/usr/sbin/flash_erase" ]] || return 1
+[[ -x "$cache_root/usr/lib/u-boot/radxa-cubie-a5e/setup.sh" ]] || return 1
+[[ -s "$cache_root/usr/lib/u-boot/radxa-cubie-a5e/boot0_spinor.bin" ]] || return 1
+[[ -s "$cache_root/usr/lib/u-boot/radxa-cubie-a5e/boot_package.fex" ]] || return 1
+[[ -s "$cache_root/usr/lib/u-boot/radxa-cubie-a5e/sys_partition_nor.bin" ]] || return 1
 [[ -s "$cache_root/usr/lib/firmware/regulatory.db-upstream" ]] || return 1
 [[ -s "$cache_root/usr/lib/firmware/regulatory.db.p7s-upstream" ]] || return 1
 [[ -s "$cache_root/etc/apt/preferences.d/99-cubie-a5e-managed-kernel" ]] || return 1
@@ -1007,6 +1174,7 @@ run_arm64_chroot '
         jq
         kmod
         librtui
+        mtd-utils
         network-manager
         openssl
         pkexec
@@ -1015,6 +1183,8 @@ run_arm64_chroot '
         rfkill
         rsetup
         tar
+        u-boot-aw2501
+        u-boot-radxa-cubie-a5e
         tzdata
         u-boot-menu
         wget
@@ -1075,6 +1245,8 @@ run_arm64_chroot '
     test -s /usr/lib/firmware/regulatory.db-upstream
     test -s /usr/lib/firmware/regulatory.db.p7s-upstream
 '
+
+validate_radxa_uboot_runtime
 }
 
 prepare_cached_target_runtime() {
@@ -1268,6 +1440,7 @@ run_arm64_chroot '
         jq
         kmod
         librtui
+        mtd-utils
         network-manager
         openssl
         pkexec
@@ -1323,6 +1496,8 @@ run_arm64_chroot '
 '
 
 restore_chroot_resolver
+
+install_radxa_uboot_runtime
 
 require_nonempty_file "$ROOT_MNT/usr/share/bash-completion/bash_completion"
 require_nonempty_file "$bashrc"
@@ -1772,9 +1947,45 @@ grep -Fxq 'CONSOLE_LOGIN=prompt' \
 }
 
 validate_rsetup_runtime() {
+local nvme_smoke_output
+local nvme_smoke_status
+local product_id
+local setup_script
 local smoke_output
 local smoke_status
 local status_file="$ROOT_MNT/var/lib/cubie-a5e/rsetup-self-test.status"
+
+log "Validating the installed Cubie A5E SPI maintenance and NVMe migration runtime."
+validate_radxa_uboot_runtime
+
+if nvme_smoke_output="$(
+    run_arm64_chroot '/usr/local/sbin/cubie-a5e-install-nvme --self-test' 2>&1
+)"; then
+    nvme_smoke_status=0
+else
+    nvme_smoke_status=$?
+fi
+
+if [[ -n "$nvme_smoke_output" ]]; then
+    printf '%s\n' "$nvme_smoke_output"
+fi
+
+((nvme_smoke_status == 0)) ||
+    die "Installed NVMe installer self-test exited with status $nvme_smoke_status."
+grep -Fxq 'cubie-a5e-install-nvme self-test: PASS' <<<"$nvme_smoke_output" ||
+    die "Installed NVMe installer self-test did not report PASS."
+
+product_id="$(
+    run_arm64_chroot         'source /usr/lib/rsetup/mod/hwid.sh; get_product_id'
+)"
+[[ "$product_id" == "radxa-cubie-a5e" ]] ||
+    die "Radxa rsetup product ID mismatch: ${product_id:-missing}"
+
+setup_script="$(
+    run_arm64_chroot         'source /usr/lib/rsetup/mod/hwid.sh; source /usr/lib/rsetup/mod/get_setup_script.sh; get_setup_script'
+)"
+[[ "$setup_script" == "$RADXA_UBOOT_PAYLOAD_DIR/setup.sh" ]] ||
+    die "Radxa rsetup bootloader backend mismatch: ${setup_script:-missing}"
 
 log "Running the installed rsetup dependency and source-chain smoke test."
 
@@ -1826,6 +2037,9 @@ install -d -m 0755 -- "$(dirname -- "$status_file")"
     printf 'RSETUP_SELF_TEST=PASS\n'
     printf 'RSETUP_PACKAGE_STATUS=installed\n'
     printf 'LIBRTUI_PACKAGE_STATUS=installed\n'
+    printf 'NVME_INSTALLER_SELF_TEST=PASS\n'
+    printf 'RADXA_UBOOT_VERSION=%q\n' "$RADXA_UBOOT_VERSION"
+    printf 'RADXA_UBOOT_BACKEND=PASS\n'
     printf 'TESTED_UTC=%q\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 } >"$status_file"
 chmod 0644 "$status_file"
@@ -2259,6 +2473,12 @@ printf 'rsetup and librtui installed from packages: yes\n'
 printf 'rsetup chroot source-chain smoke test: PASS\n'
 printf 'rsetup NVMe migration entry installed: yes\n'
 printf 'NVMe installer path: /usr/local/sbin/cubie-a5e-install-nvme\n'
+printf 'NVMe installer self-test: PASS\n'
+printf 'SPI-NOR Linux service frequency: 20000000 Hz (validated by Stage 27/80)\n'
+printf 'mtd-utils installed: yes\n'
+printf 'Radxa Cubie A5E U-Boot maintenance payload: %s\n' "$RADXA_UBOOT_VERSION"
+printf 'Radxa U-Boot setup backend: %s/setup.sh\n' "$RADXA_UBOOT_PAYLOAD_DIR"
+printf 'Automatic SPI flashing during image build: no\n'
 printf 'Raspberry Pi OS Lite compatible base utilities installed: yes\n'
 printf 'Basic package manifest: %s\n' "$BASIC_PACKAGES_TARGET"
 printf 'Stage 60 runtime rootfs cache status: %s\n' "$RUNTIME_CACHE_STATUS"
@@ -2286,7 +2506,7 @@ printf 'Managed Cubie A5E entry default: yes\n'
 }
 
 main() {
-log "Stage 60 revision: guarded-runtime-rootfs-cache-20260818"
+log "Stage 60 revision: spi-maintenance-nvme-guard-v2-20260821"
 require_command awk
 require_command blkid
 require_command chroot
@@ -2294,6 +2514,7 @@ require_command cmp
 require_command date
 require_command depmod
 require_command diff
+require_command dpkg-deb
 require_command find
 require_command findmnt
 require_command grep
@@ -2315,6 +2536,7 @@ require_command sort
 require_command strings
 require_command sync
 require_command umount
+require_command wget
 
 [[ "$(id -u)" -eq 0 ]] ||
     die "Run this stage as root."
@@ -2384,6 +2606,8 @@ log "Installed Linux $KERNEL_RELEASE."
 log "Set extlinux default to the single cubie-a5e entry."
 log "Removed the official Linux 5.15 kernel and recovery entries."
 log "Installed and smoke-tested rsetup with signed Cubie A5E updates and NVMe migration."
+log "Installed mtd-utils and the official Radxa Cubie A5E U-Boot $RADXA_UBOOT_VERSION maintenance payload."
+log "SPI firmware is not flashed automatically; rsetup remains the explicit firmware update gate."
 log "Installed the Raspberry Pi OS Lite compatible base utility set."
 log "Installed one-time automatic root filesystem expansion."
 log "Cleaned disposable target APT caches to reduce image size."
