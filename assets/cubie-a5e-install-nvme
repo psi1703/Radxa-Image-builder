@@ -478,21 +478,8 @@ prepare_target_partition_table() {
         -t 3:8300 \
         -c 3:rootfs \
         "$TARGET_DISK" >/dev/null
-
-    # Radxa's SPI U-Boot distro scan only considers GPT partitions carrying
-    # the legacy BIOS bootable attribute. The donor image has this bit set on
-    # partition 3. Deleting/recreating partition 3 drops the attribute unless
-    # we restore it explicitly, causing U-Boot to scan the empty EFI partition
-    # 2 and skip the Debian root filesystem. GPT attribute bit 2 is the legacy
-    # BIOS bootable flag used by U-Boot's `part list ... -bootable` path.
-    sgdisk -A 3:set:2 "$TARGET_DISK" >/dev/null
-
     sgdisk -G "$TARGET_DISK" >/dev/null
     sgdisk -v "$TARGET_DISK" >/dev/null 2>&1 || die "Target GPT validation failed after recreation."
-
-    sgdisk -i 3 "$TARGET_DISK" |
-        grep -Eq '^Attribute flags:[[:space:]]+[0-9A-Fa-f]{15}[4567cCdDeEfF]$' ||
-        die "Target partition 3 is missing the GPT legacy bootable attribute required by SPI U-Boot."
 
     partprobe "$TARGET_DISK"
     udevadm settle
