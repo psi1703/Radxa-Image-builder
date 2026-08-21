@@ -100,6 +100,10 @@ grep -Fq 'local nvme_installer="$ROOT_MNT/usr/local/sbin/cubie-a5e-install-nvme"
     "$PROJECT_ROOT/80-validate-image.sh" || fail "Stage 80 NVMe installer validation is missing."
 grep -Fq 'iflag=count_bytes' \
     "$PROJECT_ROOT/assets/cubie-a5e-install-nvme" || fail "NVMe installer boot-chain prefix copy is missing."
+grep -Fq 'sgdisk -A 3:set:2 "$TARGET_DISK"' \
+    "$PROJECT_ROOT/assets/cubie-a5e-install-nvme" || fail "NVMe installer partition-3 bootable-attribute restore is missing."
+grep -Fq 'Target partition 3 is missing the GPT legacy bootable attribute required by SPI U-Boot.' \
+    "$PROJECT_ROOT/assets/cubie-a5e-install-nvme" || fail "NVMe installer bootable-attribute validation is missing."
 grep -Fq 'mkfs.ext4 -F -L rootfs -U random' \
     "$PROJECT_ROOT/assets/cubie-a5e-install-nvme" || fail "NVMe installer fresh root UUID creation is missing."
 
