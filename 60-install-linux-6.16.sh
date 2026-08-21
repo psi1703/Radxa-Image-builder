@@ -1842,7 +1842,7 @@ group_csv="$(
 run_arm64_chroot \
     "usermod --append --groups '$group_csv' '$INITBOX_USER'"
 
-install -d -m 0755 -- "$ROOT_MNT/tmp"
+install -d -m 1777 -- "$ROOT_MNT/tmp"
 install -m 0600 /dev/null "$INITBOX_PASSWORD_FILE"
 printf '%s:%s\n' "$INITBOX_USER" "$INITBOX_PASSWORD" \
     >"$INITBOX_PASSWORD_FILE"
