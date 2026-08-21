@@ -213,6 +213,11 @@ enable_kernel_module() {
     run "$SCRIPTS_CONFIG" --file "$KERNEL_CONFIG" --module "$option"
 }
 
+disable_kernel_option() {
+    local option="$1"
+    run "$SCRIPTS_CONFIG" --file "$KERNEL_CONFIG" --disable "$option"
+}
+
 configure_kernel() {
     local required_options=(
         CFG80211 CFG80211_REQUIRE_SIGNED_REGDB
@@ -241,6 +246,12 @@ configure_kernel() {
     for option in "${required_modules[@]}"; do
         enable_kernel_module "$option"
     done
+
+    # Cubie A5E Ethernet uses the Realtek RTL8211F PHY. The generic arm64
+    # defconfig can enable the unrelated Microsemi VSC85xx PHY driver, whose
+    # firmware references make update-initramfs emit missing-firmware warnings.
+    # Disable that unused driver rather than adding irrelevant firmware.
+    disable_kernel_option "MICROSEMI_PHY"
 
     run make -C "$KERNEL_DIR" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
 }
@@ -276,6 +287,9 @@ validate_kernel_config() {
         die "CONFIG_AW_PCIE_RC must be a module."
     grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$KERNEL_CONFIG" ||
         die "CONFIG_PHY_SUNXI_INNO_COMBOPHY must be a module."
+
+    grep -Fxq '# CONFIG_MICROSEMI_PHY is not set' "$KERNEL_CONFIG" ||
+        die "CONFIG_MICROSEMI_PHY must be disabled to avoid unused VSC85xx firmware references."
 
     grep -Fxq 'CONFIG_SPI_SUN6I=y' "$KERNEL_CONFIG" ||
         die "CONFIG_SPI_SUN6I must be built in."
@@ -582,6 +596,7 @@ write_reports() {
         printf 'PCIe root complex: Allwinner v210, Gen2 x1, built in\n'
         printf 'PCIe combo PHY: Innosilicon, built in\n'
         printf 'NVMe host driver: built in\n'
+        printf 'Ethernet PHY driver: Realtek enabled; unused Microsemi VSC85xx driver disabled\n'
         printf 'A523 SPI0 controller driver: built in\n'
         printf 'SPI-NOR framework: built in\n'
         printf 'Cubie A5E SPI-NOR maximum frequency: 20000000 Hz\n'
