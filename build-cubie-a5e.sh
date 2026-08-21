@@ -491,6 +491,7 @@ install_required_host_packages() {
         file
         flex
         gcc-aarch64-linux-gnu
+        gdisk
         git
         kmod
         libelf-dev
@@ -554,7 +555,7 @@ install_required_host_packages() {
 require_host_commands() {
     local commands=(
         awk bash blockdev date df dtc findmnt flock grep head lsblk make
-        mountpoint nproc pahole readlink sed sha256sum sort sync tee udevadm umount
+        mountpoint nproc pahole readlink rm sed sgdisk sha256sum sort sync tee udevadm umount
     )
     local command_name
 
@@ -710,6 +711,44 @@ compute_build_fingerprints() {
     log "Kernel cache fingerprint: $KERNEL_INPUT_FINGERPRINT"
     log "Stable kernel local version: $KERNEL_LOCALVERSION"
     log "AIC8800 cache fingerprint: $AIC_INPUT_FINGERPRINT"
+}
+
+cleanup_previous_image_outputs() {
+    local output_dir_real
+    local artifact
+    local removed_count=0
+
+    output_dir_real="$(safe_realpath "$IMAGE_OUTPUT_DIR")"
+
+    [[ "$output_dir_real" == "/home/psi" ]] ||
+        die "Refusing old-image cleanup outside /home/psi: $output_dir_real"
+
+    log "Checking for previous Cubie A5E generated image artifacts in $IMAGE_OUTPUT_DIR."
+
+    while IFS= read -r -d '' artifact; do
+        [[ -f "$artifact" && ! -L "$artifact" ]] ||
+            die "Refusing to remove unsafe image artifact: $artifact"
+
+        log "Removing previous image artifact: $artifact"
+        rm -f -- "$artifact"
+        removed_count=$((removed_count + 1))
+    done < <(
+        find "$IMAGE_OUTPUT_DIR" \
+            -maxdepth 1 \
+            -type f \
+            \( \
+                -name 'cubie-a5e-debian13-linux6.16-*.img' \
+                -o -name 'cubie-a5e-debian13-linux6.16-*.img.xz' \
+                -o -name 'cubie-a5e-debian13-linux6.16-*.img.xz.sha256' \
+            \) \
+            -print0
+    )
+
+    if ((removed_count == 0)); then
+        log "No previous Cubie A5E generated image artifacts were found."
+    else
+        log "Removed $removed_count previous Cubie A5E image artifact(s)."
+    fi
 }
 
 validate_output_settings() {
@@ -1011,13 +1050,19 @@ main() {
     esac
 
     validate_cache_settings
-    validate_output_settings
     validate_paths
     install_required_host_packages
     require_host_commands
     validate_source_inputs
-    compute_build_fingerprints
+
+    # Acquire the build lock before deleting any previous generated image.
+    # This prevents one wrapper invocation from removing artifacts belonging to
+    # another build that is still running.
     acquire_build_lock
+    cleanup_previous_image_outputs
+
+    validate_output_settings
+    compute_build_fingerprints
 
     if [[ "$BUILD_MODE" == "image" ]]; then
         if [[ "$OUTPUT_MODE" == "device" ]]; then
