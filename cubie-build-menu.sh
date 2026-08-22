@@ -24,6 +24,8 @@ show_header() {
     local linux_ref="unknown"
     local aic_ref="unknown"
     local bsp_ref="unknown"
+    local board_support_version="unknown"
+    local apt_channel="not configured"
 
     if [[ -r "$SOURCE_PINS" ]]; then
         # shellcheck disable=SC1090
@@ -31,6 +33,10 @@ show_header() {
         linux_ref="${LINUX_REF:-unknown}"
         aic_ref="${AIC_REF:-unknown}"
         bsp_ref="${BSP_REF:-unknown}"
+        board_support_version="${CUBIE_BOARD_SUPPORT_VERSION:-unknown}"
+        if [[ -n "${CUBIE_APT_REPO_URL:-}" ]]; then
+            apt_channel="$CUBIE_APT_REPO_URL"
+        fi
     fi
 
     clear 2>/dev/null || true
@@ -41,6 +47,8 @@ show_header() {
 Kernel pin : $linux_ref
 AIC8800    : $aic_ref
 Radxa BSP  : $bsp_ref
+Board pkg  : $board_support_version
+APT channel: $apt_channel
 Repo       : $SCRIPT_DIR
 ============================================================
 EOF_HEADER
@@ -80,13 +88,13 @@ build_direct_image() {
 
 build_update_bundle() {
     run_build \
-        'Building signed kernel/board update bundle from the currently pinned sources.' \
+        'Building signed kernel/board bundle plus APT update package/repository from the currently pinned sources.' \
         BUILD_MODE=update-bundle
 }
 
 force_kernel_update_bundle() {
     run_build \
-        'Forcing a clean kernel and AIC8800 rebuild, then creating a signed update bundle.' \
+        'Forcing a clean kernel and AIC8800 rebuild, then creating the signed bundle and APT update repository.' \
         BUILD_MODE=update-bundle \
         KERNEL_REBUILD=1 \
         AIC_REBUILD=1
@@ -107,6 +115,8 @@ show_source_pins() {
         -e '/^BSP_/p' \
         -e '/^AIC_/p' \
         -e '/^RADXA_UBOOT_VERSION=/p' \
+        -e '/^CUBIE_BOARD_SUPPORT_VERSION=/p' \
+        -e '/^CUBIE_APT_REPO_URL=/p' \
         "$SOURCE_PINS"
 }
 
@@ -125,6 +135,7 @@ validate_repository() {
         "$SCRIPT_DIR/30-build-kernel.sh"
         "$SCRIPT_DIR/40-build-aic8800.sh"
         "$SCRIPT_DIR/45-build-update-bundle.sh"
+        "$SCRIPT_DIR/46-build-apt-update-repository.sh"
         "$SCRIPT_DIR/50-write-base-image.sh"
         "$SCRIPT_DIR/60-install-linux-6.16.sh"
         "$SCRIPT_DIR/70-install-network-policy.sh"
@@ -151,13 +162,23 @@ validate_repository() {
     done
 
     if command -v shellcheck >/dev/null 2>&1; then
-        printf '\nRunning ShellCheck on the build menu and NVMe installer.\n'
-        shellcheck "$SCRIPT_DIR/cubie-build-menu.sh" "$SCRIPT_DIR/assets/cubie-a5e-install-nvme" || failed=1
+        printf '\nRunning ShellCheck on the changed build/update entry points.\n'
+        shellcheck \
+            "$SCRIPT_DIR/cubie-build-menu.sh" \
+            "$SCRIPT_DIR/46-build-apt-update-repository.sh" \
+            "$SCRIPT_DIR/assets/cubie-a5e-install-nvme" \
+            "$SCRIPT_DIR/assets/rsetup" || failed=1
     else
         printf '\nShellCheck is not installed; static ShellCheck pass skipped.\n'
     fi
 
     ((failed == 0)) || return 1
+
+    if [[ -x "$SCRIPT_DIR/tools/validate-repository.sh" ]]; then
+        printf '\nRunning repository policy/source validation.\n'
+        "$SCRIPT_DIR/tools/validate-repository.sh" || return 1
+    fi
+
     printf '\nRepository script validation: PASS\n'
 }
 
@@ -172,8 +193,8 @@ main() {
         cat <<'MENU'
 1. Build complete Balena Etcher image
 2. Build complete image directly to a device
-3. Build signed kernel / board update bundle
-4. Force clean kernel + AIC8800 rebuild and update bundle
+3. Build signed kernel / board APT update repository
+4. Force clean kernel + AIC8800 rebuild and APT update repository
 5. Rebuild Debian rootfs and complete Etcher image
 6. Validate repository scripts
 7. Show source pins
