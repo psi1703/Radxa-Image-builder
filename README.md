@@ -28,11 +28,11 @@ Radxa-Image-builder/
 |-- cubie-build-menu.sh            # interactive build/update menu
 |-- 10-...sh through 80-...sh      # ordered build and validation stages
 |-- base/                           # donor-image and Debian rootfs writer
-|-- assets/                         # small board runtime assets tracked by Git
-|-- config/source-pins.env          # pinned upstream refs and donor checksum
-|-- docs/
-|-- tools/
-`-- MANIFEST.sha256
+|-- assets/                         # board runtime assets installed into the image
+|-- config/source-pins.env          # pinned upstream refs, versions and donor checksum
+|-- docs/                           # build-flow and project architecture documentation
+|-- tools/                          # repository validation and maintenance utilities
+`-- MANIFEST.sha256                 # checksums for tracked repository files
 ```
 
 Downloaded sources, rootfs files, build objects, logs, update bundles, generated APT repositories and signing keys stay under the ignored `build/` directory. In Etcher-image mode, the temporary raw image, final compressed image and checksum are created directly under `/home/psi/`; the temporary raw image is removed after successful compression. No file from the old `/home/psi/cubie-a5e-build` layout is required.
