@@ -14,6 +14,8 @@ export STAGE_NAME="DTS"
 : "${BUILD_ROOT:?BUILD_ROOT is not set}"
 : "${KERNEL_DIR:?KERNEL_DIR is not set}"
 : "${CROSS_COMPILE:?CROSS_COMPILE is not set}"
+: "${LINUX_REF:?LINUX_REF is not set}"
+: "${LINUX_EXPECTED_COMMIT:?LINUX_EXPECTED_COMMIT is not set}"
 
 readonly DTS="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dts"
 readonly DTB="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dtb"
@@ -22,7 +24,7 @@ readonly PINCTRL_DRIVER="$KERNEL_DIR/drivers/pinctrl/sunxi/pinctrl-sun55i-a523.c
 readonly R_PINCTRL_DRIVER="$KERNEL_DIR/drivers/pinctrl/sunxi/pinctrl-sun55i-a523-r.c"
 readonly MARK_BEGIN='/* CUBIE_A5E_ONE_SHOT_BEGIN */'
 readonly MARK_END='/* CUBIE_A5E_ONE_SHOT_END */'
-readonly BACKUP="$DTS.before-one-shot"
+readonly BACKUP="$DTS.before-hardware-dts"
 
 if [[ -n "${LOG_DIR:-}" ]]; then
     mkdir -p -- "$LOG_DIR"
@@ -83,40 +85,44 @@ path.write_text(text.rstrip() + "\n", encoding="utf-8")
 PY
 }
 
-apply_wifi_support_backports() {
-    log "Applying tested Cubie A5E Wi-Fi power and GPIO fixes."
+validate_kernel_lineage() {
+    local base_commit
 
-    # The transformer is supplied by the heredoc on stdin.  Keep the explicit
-    # "-" so Python does not try to execute the DTS path as Python source.
-    python3 - \
-        "$DTS" \
-        "$SOC_DTSI" \
-        "$PINCTRL_DRIVER" \
-        "$R_PINCTRL_DRIVER" <<'PY'
+    [[ "$LINUX_REF" == v6.18.* ]] ||
+        die "Stage 25 is reviewed for the Linux 6.18.y LTS family; found LINUX_REF=$LINUX_REF"
+
+    base_commit="$(git -C "$KERNEL_DIR" rev-parse "$LINUX_EXPECTED_COMMIT^{commit}")" ||
+        die "Pinned Linux base commit is unavailable: $LINUX_EXPECTED_COMMIT"
+    [[ "$base_commit" == "$LINUX_EXPECTED_COMMIT" ]] ||
+        die "Pinned Linux base commit mismatch: expected $LINUX_EXPECTED_COMMIT, found $base_commit"
+
+    git -C "$KERNEL_DIR" merge-base --is-ancestor "$LINUX_EXPECTED_COMMIT" HEAD ||
+        die "Kernel tree is not based on pinned Linux commit $LINUX_EXPECTED_COMMIT"
+}
+
+apply_wifi_board_adjustments() {
+    log "Applying tested Cubie A5E Wi-Fi board power adjustment."
+
+    # Linux 6.18.y already contains the A523 GPIO-bank IRQ correction and no
+    # longer uses the invalid irq_read_needs_mux workaround. Stage 25 therefore
+    # changes only the Cubie board regulator state and validates the upstream
+    # SoC/pinctrl baseline rather than rewriting those source files.
+    python3 - "$DTS" <<'PYWIFI'
 from pathlib import Path
 import sys
 
 board_path = Path(sys.argv[1])
-soc_path = Path(sys.argv[2])
-pinctrl_path = Path(sys.argv[3])
-r_pinctrl_path = Path(sys.argv[4])
-
 board = board_path.read_text(encoding="utf-8")
-soc = soc_path.read_text(encoding="utf-8")
-pinctrl = pinctrl_path.read_text(encoding="utf-8")
-r_pinctrl = r_pinctrl_path.read_text(encoding="utf-8")
 
 
 def node_span(text: str, marker: str):
     marker_pos = text.find(marker)
     if marker_pos < 0:
         raise SystemExit(f"Wi-Fi: node marker not found: {marker}")
-
     line_start = text.rfind("\n", 0, marker_pos) + 1
     open_brace = text.find("{", marker_pos)
     if open_brace < 0:
         raise SystemExit(f"Wi-Fi: opening brace not found for {marker}")
-
     depth = 0
     for pos in range(open_brace, len(text)):
         char = text[pos]
@@ -136,13 +142,10 @@ def node_span(text: str, marker: str):
                 else:
                     line_end += 1
                 return line_start, line_end, open_brace
-
     raise SystemExit(f"Wi-Fi: closing brace not found for {marker}")
 
 
-bldo1_start, bldo1_end, bldo1_open = node_span(
-    board, "reg_bldo1: bldo1"
-)
+bldo1_start, bldo1_end, bldo1_open = node_span(board, "reg_bldo1: bldo1")
 bldo1 = board[bldo1_start:bldo1_end]
 
 if "regulator-always-on;" not in bldo1:
@@ -155,43 +158,19 @@ if "regulator-always-on;" not in bldo1:
         + board[insertion + 1:]
     )
 
-pio_start, pio_end, _ = node_span(soc, "pio: pinctrl@2000000")
-pio_node = soc[pio_start:pio_end]
-
-if "<GIC_SPI 67 IRQ_TYPE_LEVEL_HIGH>" not in pio_node:
-    old = "interrupts = <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,"
-    new = (
-        "interrupts = <GIC_SPI 67 IRQ_TYPE_LEVEL_HIGH>,\n"
-        "\t\t\t\t     <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,"
-    )
-
-    if old not in pio_node:
-        raise SystemExit(
-            "Wi-Fi: A523 main pinctrl interrupt insertion anchor not found"
-        )
-
-    pio_node = pio_node.replace(old, new, 1)
-    soc = soc[:pio_start] + pio_node + soc[pio_end:]
-
-irq_mux_line = "\t.irq_read_needs_mux = true,\n"
-
-for path, text in (
-    (pinctrl_path, pinctrl),
-    (r_pinctrl_path, r_pinctrl),
-):
-    if text.count(irq_mux_line) > 1:
-        raise SystemExit(
-            f"Wi-Fi: unexpected duplicate IRQ remux flags in {path}"
-        )
-
-pinctrl = pinctrl.replace(irq_mux_line, "")
-r_pinctrl = r_pinctrl.replace(irq_mux_line, "")
-
 board_path.write_text(board, encoding="utf-8")
-soc_path.write_text(soc, encoding="utf-8")
-pinctrl_path.write_text(pinctrl, encoding="utf-8")
-r_pinctrl_path.write_text(r_pinctrl, encoding="utf-8")
-PY
+PYWIFI
+
+    grep -F '<GIC_SPI 67 IRQ_TYPE_LEVEL_HIGH>,' "$SOC_DTSI" >/dev/null ||
+        die "Linux 6.18 A523 pinctrl baseline is missing GPIO bank interrupt 67."
+
+    grep -F 'mmc1_pins: mmc1-pins {' "$SOC_DTSI" >/dev/null ||
+        die "Linux 6.18 A523 baseline is missing the mmc1 pin group."
+
+    if grep -F '.irq_read_needs_mux = true,' \
+        "$PINCTRL_DRIVER" "$R_PINCTRL_DRIVER" >/dev/null; then
+        die "Linux 6.18 A523 pinctrl baseline unexpectedly enables irq_read_needs_mux."
+    fi
 }
 
 append_hardware_configuration() {
@@ -331,12 +310,12 @@ if end < 0 or "regulator-always-on;" not in text[start:end]:
 PY
 
     if print_managed_block |
-        grep -Eq 'sunxi-rfkill|sunxi-wlan|wlan_busnum|wlan_power'; then
+        grep -E 'sunxi-rfkill|sunxi-wlan|wlan_busnum|wlan_power' >/dev/null; then
         die "Managed DTS block must use native MMC/SDIO power and must not add the vendor RFKill contract."
     fi
 
     if print_managed_block |
-        grep -qF '&mmc1_pins {'; then
+        grep -F '&mmc1_pins {' >/dev/null; then
         die "Managed DTS block must retain the SoC mmc1 pin drive strength and must not override mmc1_pins."
     fi
 
@@ -368,12 +347,12 @@ PY
         die "AIC8800 host-wake interrupt name is missing."
 
     if print_managed_block |
-        grep -qF 'vmmc-supply = <&reg_bldo1>;'; then
+        grep -F 'vmmc-supply = <&reg_bldo1>;' >/dev/null; then
         die "mmc1 vmmc must not use the BLDO1 I/O rail."
     fi
 
     if print_managed_block |
-        grep -Eq '^&gmac1|^&mdio1|ethernet1[[:space:]]*='; then
+        grep -E '^&gmac1|^&mdio1|ethernet1[[:space:]]*=' >/dev/null; then
         die "Stage 25 must not modify GMAC1."
     fi
 
@@ -440,6 +419,17 @@ decompile_and_validate_dtb() {
 
     grep -qF 'non-removable;' "$DTB_DECOMPILED" ||
         die "Compiled DTB does not mark Wi-Fi non-removable."
+
+    [[ "$(fdtget -t s "$DTB" /soc/ethernet@4500000 phy-mode)" == "rgmii" ]] ||
+        die "Compiled DTB does not keep the validated GMAC0 RGMII mode."
+    [[ "$(fdtget -t u "$DTB" /soc/ethernet@4500000 allwinner,tx-delay-ps)" == "200" ]] ||
+        die "Compiled DTB does not keep the validated GMAC0 200 ps TX delay."
+    [[ "$(fdtget -t u "$DTB" /soc/ethernet@4500000 allwinner,rx-delay-ps)" == "400" ]] ||
+        die "Compiled DTB does not keep the validated GMAC0 400 ps RX delay."
+    [[ "$(fdtget -t u "$DTB" /soc/ethernet@4500000/mdio/ethernet-phy@1 reset-assert-us)" == "50000" ]] ||
+        die "Compiled DTB does not keep the validated GMAC0 PHY reset assert time."
+    [[ "$(fdtget -t u "$DTB" /soc/ethernet@4500000/mdio/ethernet-phy@1 reset-deassert-us)" == "200000" ]] ||
+        die "Compiled DTB does not keep the validated GMAC0 PHY reset deassert time."
 
     [[ "$(
         fdtget -t s \
@@ -521,7 +511,7 @@ decompile_and_validate_dtb() {
     fdtget -p \
         "$DTB" \
         /soc/i2c@7081400/pmic@34/regulators/bldo1 |
-        grep -Fxq 'regulator-always-on' ||
+        grep -Fx 'regulator-always-on' >/dev/null ||
         die "Compiled DTB does not keep BLDO1 enabled."
 
     [[ "$(
@@ -594,6 +584,8 @@ decompile_and_validate_dtb() {
 write_report() {
     {
         printf 'Cubie A5E hardware DTS report\n'
+        printf 'Linux ref: %s\n' "$LINUX_REF"
+        printf 'Linux base commit: %s\n' "$LINUX_EXPECTED_COMMIT"
         printf '==============================\n'
         printf 'Source DTS: %s\n' "$DTS"
         printf 'Compiled DTB: %s\n' "$DTB"
@@ -615,7 +607,7 @@ write_report() {
         printf 'Wi-Fi SDIO maximum clock: 40000000 Hz\n'
         printf 'Wi-Fi SDIO pin drive strength: 30 mA\n'
         printf 'Wi-Fi SDIO function: wifi@1\n'
-        printf 'A523 GPIO IRQ remux workaround removed: yes\n'
+        printf 'A523 GPIO IRQ baseline supplied by Linux 6.18.y: yes\n'
         printf 'Wi-Fi driver platform path: generic Linux SDIO\n'
         printf 'Vendor RFKill/rescan node present: no\n'
     } >"$DTS_REPORT"
@@ -623,10 +615,7 @@ write_report() {
 
 commit_hardware_dts() {
     git -C "$KERNEL_DIR" add -- \
-        arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dts \
-        arch/arm64/boot/dts/allwinner/sun55i-a523.dtsi \
-        drivers/pinctrl/sunxi/pinctrl-sun55i-a523.c \
-        drivers/pinctrl/sunxi/pinctrl-sun55i-a523-r.c
+        arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dts
 
     if ! git -C "$KERNEL_DIR" diff --cached --quiet; then
         run git -C "$KERNEL_DIR" commit \
@@ -644,6 +633,7 @@ main() {
     require_command grep
 
     need_dir "$KERNEL_DIR"
+    validate_kernel_lineage
     require_nonempty_file "$DTS"
     require_nonempty_file "$SOC_DTSI"
     require_nonempty_file "$PINCTRL_DRIVER"
@@ -655,7 +645,7 @@ main() {
     fi
 
     remove_existing_managed_block
-    apply_wifi_support_backports
+    apply_wifi_board_adjustments
     append_hardware_configuration
     validate_source_dts
     build_board_dtb
