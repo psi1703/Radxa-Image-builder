@@ -13,13 +13,20 @@ export STAGE_NAME="SPI"
 
 : "${BUILD_ROOT:?BUILD_ROOT is not set}"
 : "${KERNEL_DIR:?KERNEL_DIR is not set}"
+: "${LINUX_REF:?LINUX_REF is not set}"
+: "${LINUX_EXPECTED_COMMIT:?LINUX_EXPECTED_COMMIT is not set}"
 
-readonly EXPECTED_KERNEL_DIR="$BUILD_ROOT/linux-6.16-one-shot"
+KERNEL_VERSION_COMPONENT="${LINUX_REF#v}"
+[[ "$KERNEL_VERSION_COMPONENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "Unsupported LINUX_REF for Stage 27: $LINUX_REF"
+readonly KERNEL_VERSION_COMPONENT
+readonly EXPECTED_KERNEL_DIR="$BUILD_ROOT/linux-${KERNEL_VERSION_COMPONENT}-one-shot"
 readonly SPI_DRIVER="$KERNEL_DIR/drivers/spi/spi-sun6i.c"
+readonly SPI_BINDING="$KERNEL_DIR/Documentation/devicetree/bindings/spi/allwinner,sun6i-a31-spi.yaml"
 readonly SOC_DTSI="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a523.dtsi"
 readonly BOARD_DTS="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dts"
 readonly SPI_STAMP="$KERNEL_DIR/.cubie-a5e-a523-spi-backport"
-readonly SPI_REVISION="a523-spi-mainline-backport-v3-pio-spi-nor-20mhz"
+readonly SPI_REVISION="a523-spi-linux-6.18-lts-v4-pio-spi-nor-20mhz"
 
 if [[ -n "${LOG_DIR:-}" ]]; then
     mkdir -p -- "$LOG_DIR"
@@ -61,8 +68,27 @@ if re.search(r"^[ \t]*(?:dmas|dma-names)\s*=", node, flags=re.MULTILINE):
 PY
 }
 
+validate_kernel_baseline() {
+    local base_commit
+
+    need_dir "$KERNEL_DIR/.git"
+    need_nonempty_file "$KERNEL_DIR/Makefile"
+
+    [[ "$LINUX_REF" == v6.18.* ]] ||
+        die "Stage 27 has only been reviewed for Linux 6.18.y LTS; found $LINUX_REF"
+
+    base_commit="$(git -C "$KERNEL_DIR" rev-parse "$LINUX_EXPECTED_COMMIT^{commit}")" ||
+        die "Pinned Linux base commit is unavailable: $LINUX_EXPECTED_COMMIT"
+    [[ "$base_commit" == "$LINUX_EXPECTED_COMMIT" ]] ||
+        die "Pinned Linux base commit mismatch: expected $LINUX_EXPECTED_COMMIT, found $base_commit"
+
+    git -C "$KERNEL_DIR" merge-base --is-ancestor "$LINUX_EXPECTED_COMMIT" HEAD ||
+        die "Kernel tree is not based on pinned Linux commit $LINUX_EXPECTED_COMMIT"
+}
+
 validate_backport() {
     need_nonempty_file "$SPI_DRIVER"
+    need_nonempty_file "$SPI_BINDING"
     need_nonempty_file "$SOC_DTSI"
     need_nonempty_file "$BOARD_DTS"
 
@@ -70,6 +96,10 @@ validate_backport() {
         '{ .compatible = "allwinner,sun55i-a523-spi", .data = &sun50i_r329_spi_cfg },' \
         "$SPI_DRIVER" ||
         die "The A523 compatible is missing from spi-sun6i.c."
+    grep -qF -- '- const: allwinner,sun55i-a523-spi' "$SPI_BINDING" ||
+        die "The A523 SPI compatible is missing from the DT binding."
+    grep -qF -- '- const: allwinner,sun55i-a523-spi-dbi' "$SPI_BINDING" ||
+        die "The A523 SPI DBI compatible is missing from the DT binding."
 
     grep -qF 'spi0_pc_pins: spi0-pc-pins {' "$SOC_DTSI" ||
         die "The A523 SPI0 PC pin group is missing."
@@ -114,10 +144,13 @@ validate_backport() {
 completed_backport_available() {
     [[ -s "$SPI_STAMP" ]] || return 1
     grep -Fxq "revision=$SPI_REVISION" "$SPI_STAMP" || return 1
+    grep -Fxq "linux_ref=$LINUX_REF" "$SPI_STAMP" || return 1
+    grep -Fxq "linux_base_commit=$LINUX_EXPECTED_COMMIT" "$SPI_STAMP" || return 1
     grep -Fxq 'status=complete' "$SPI_STAMP" || return 1
     grep -qF \
         '{ .compatible = "allwinner,sun55i-a523-spi", .data = &sun50i_r329_spi_cfg },' \
         "$SPI_DRIVER" || return 1
+    grep -qF -- '- const: allwinner,sun55i-a523-spi' "$SPI_BINDING" || return 1
     grep -qF 'spi0: spi@4025000 {' "$SOC_DTSI" || return 1
     grep -qF '&spi0 {' "$BOARD_DTS" || return 1
     grep -qF 'compatible = "jedec,spi-nor";' "$BOARD_DTS" || return 1
@@ -127,9 +160,9 @@ completed_backport_available() {
 }
 
 apply_backport() {
-    log "Applying the reviewed A523 SPI support to Linux 6.16 without unsupported DMA references."
+    log "Applying the reviewed upstream A523 SPI support to Linux 6.18 LTS without unsupported DMA references."
 
-    export BOARD_DTS SOC_DTSI SPI_DRIVER
+    export BOARD_DTS SOC_DTSI SPI_DRIVER SPI_BINDING
     run python3 <<'PY'
 from pathlib import Path
 import os
@@ -169,6 +202,7 @@ def node_span(text: str, pattern: str) -> tuple[int, int] | None:
 
 
 driver_path = Path(os.environ["SPI_DRIVER"])
+binding_path = Path(os.environ["SPI_BINDING"])
 soc_path = Path(os.environ["SOC_DTSI"])
 board_path = Path(os.environ["BOARD_DTS"])
 
@@ -198,6 +232,37 @@ if driver_compatible not in driver:
     insert_at = table.start("sentinel")
     driver = driver[:insert_at] + addition + driver[insert_at:]
     write(driver_path, driver)
+
+binding = read(binding_path)
+if "allwinner,sun55i-a523-spi" not in binding:
+    anchor = "      - const: allwinner,sun50i-r329-spi\n"
+    if anchor not in binding:
+        raise SystemExit("SPI backport: R329 DT binding anchor is missing")
+    binding = binding.replace(
+        anchor,
+        anchor + "      - const: allwinner,sun55i-a523-spi\n",
+        1,
+    )
+
+if "allwinner,sun55i-a523-spi-dbi" not in binding:
+    anchor = (
+        "      - items:\n"
+        "          - const: allwinner,sun20i-d1-spi-dbi\n"
+        "          - const: allwinner,sun50i-r329-spi-dbi\n"
+        "          - const: allwinner,sun50i-r329-spi\n"
+    )
+    if anchor not in binding:
+        raise SystemExit("SPI backport: R329 DBI DT binding anchor is missing")
+    binding = binding.replace(
+        anchor,
+        anchor
+        + "      - items:\n"
+        + "          - const: allwinner,sun55i-a523-spi-dbi\n"
+        + "          - const: allwinner,sun55i-a523-spi\n",
+        1,
+    )
+
+write(binding_path, binding)
 
 soc = read(soc_path)
 if "spi0_pc_pins: spi0-pc-pins" not in soc:
@@ -334,11 +399,12 @@ write_report() {
         printf '==================================\n'
         printf 'Status: PASS\n'
         printf 'Revision: %s\n' "$SPI_REVISION"
-        printf 'Linux base: 6.16\n'
+        printf 'Linux ref: %s\n' "$LINUX_REF"
+        printf 'Linux base commit: %s\n' "$LINUX_EXPECTED_COMMIT"
         printf 'Controller compatible: allwinner,sun55i-a523-spi\n'
         printf 'Controller address: 0x04025000\n'
         printf 'Controller interrupt: 16\n'
-        printf 'Controller DMA properties: omitted (A523 6.16 DTSI has no dma provider label)\n'
+        printf 'Controller DMA properties: omitted (Linux 6.18 A523 DTSI has no main DMA provider node)\n'
         printf 'Transfer fallback: FIFO/PIO when DMA channels are unavailable\n'
         printf 'SPI0 pins: PC2 PC4 PC12\n'
         printf 'SPI0 CS0 pin: PC3\n'
@@ -346,12 +412,14 @@ write_report() {
         printf 'SPI-NOR compatible: jedec,spi-nor\n'
         printf 'SPI-NOR maximum frequency: 20000000\n'
         printf 'Driver: %s\n' "$SPI_DRIVER"
+        printf 'DT binding: %s\n' "$SPI_BINDING"
         printf 'SoC DTSI: %s\n' "$SOC_DTSI"
         printf 'Board DTS: %s\n' "$BOARD_DTS"
     } >"$SPI_REPORT"
 }
 
 main() {
+    need_cmd git
     need_cmd grep
     need_cmd python3
     need_cmd readlink
@@ -360,7 +428,10 @@ main() {
        "$(readlink -f -- "$EXPECTED_KERNEL_DIR")" ]] ||
         die "Unexpected kernel directory: $KERNEL_DIR"
 
+    validate_kernel_baseline
+
     need_nonempty_file "$SPI_DRIVER"
+    need_nonempty_file "$SPI_BINDING"
     need_nonempty_file "$SOC_DTSI"
     need_nonempty_file "$BOARD_DTS"
 
@@ -376,11 +447,13 @@ main() {
 
     {
         printf 'revision=%s\n' "$SPI_REVISION"
+        printf 'linux_ref=%s\n' "$LINUX_REF"
+        printf 'linux_base_commit=%s\n' "$LINUX_EXPECTED_COMMIT"
         printf 'status=complete\n'
     } >"$SPI_STAMP"
 
     write_report
-    log "A523 SPI controller and Cubie A5E SPI-NOR enablement validated without DMA properties."
+    log "A523 SPI controller and Cubie A5E SPI-NOR enablement validated for Linux 6.18 LTS in PIO mode."
     log "SPI report: $SPI_REPORT"
 }
 
