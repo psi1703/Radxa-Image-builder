@@ -43,6 +43,7 @@ readonly INITBOX_USER="initbox"
 readonly INITBOX_PASSWORD="init"
 readonly INITBOX_SUDOERS="/etc/sudoers.d/90-initbox"
 readonly INITBOX_ACCOUNT_STATUS="/var/lib/cubie-a5e/initbox-account.status"
+readonly ADMIN_PATH_PROFILE="/etc/profile.d/cubie-a5e-admin-path.sh"
 readonly GETTY_TTY1_DROPIN="/etc/systemd/system/getty@tty1.service.d/99-initbox-login.conf"
 readonly SERIAL_GETTY_DROPIN="/etc/systemd/system/serial-getty@ttyS0.service.d/99-initbox-login.conf"
 readonly ROOT_GROW_PROGRAM="/usr/local/sbin/cubie-a5e-grow-rootfs"
@@ -83,7 +84,7 @@ readonly INITBOX_PASSWORD_FILE="$ROOT_MNT/tmp/.cubie-a5e-initbox-password"
 readonly RESOLVER_BACKUP="$BUILD_ROOT/.one-shot-resolv.conf.backup"
 readonly RESOLVER_LINK_FILE="$BUILD_ROOT/.one-shot-resolv.conf.link"
 
-readonly RUNTIME_CACHE_SCHEMA="stage60-runtime-rootfs-v2-spi-maintenance"
+readonly RUNTIME_CACHE_SCHEMA="stage60-runtime-rootfs-v3-field-runtime"
 readonly RUNTIME_CACHE_MAX_AGE_SECONDS="${RUNTIME_CACHE_MAX_AGE_SECONDS:-86400}"
 readonly RUNTIME_CACHE_REBUILD="${RUNTIME_CACHE_REBUILD:-0}"
 readonly RUNTIME_CACHE_DIR="$BUILD_ROOT/cache/stage60-runtime-rootfs"
@@ -276,10 +277,14 @@ validate_radxa_uboot_runtime
 
 module_vermagic() {
 local module_path="$1"
+local vermagic_lines
 
-strings "$module_path" |
-    sed -n 's/^vermagic=//p' |
-    head -n 1
+vermagic_lines="$(
+    strings "$module_path" |
+        sed -n 's/^vermagic=//p'
+)"
+
+printf '%s\n' "$vermagic_lines" | sed -n '1p'
 
 }
 
@@ -498,10 +503,13 @@ require_nonempty_file "$RADXA_REPO_HELPER_SRC"
     die "Radxa repository helper is not executable."
 
 if grep -Ev '^[[:space:]]*(#.*)?$|^[a-z0-9][a-z0-9+.-]*$' \
-    "$BASIC_PACKAGES_SRC" |
-    grep -q .; then
-    die "Raspberry Pi OS Lite compatible package manifest is invalid."
+    "$BASIC_PACKAGES_SRC" >"$BUILD_ROOT/.stage60-invalid-basic-packages"; then
+    if [[ -s "$BUILD_ROOT/.stage60-invalid-basic-packages" ]]; then
+        rm -f -- "$BUILD_ROOT/.stage60-invalid-basic-packages"
+        die "Raspberry Pi OS Lite compatible package manifest is invalid."
+    fi
 fi
+rm -f -- "$BUILD_ROOT/.stage60-invalid-basic-packages"
 
 while IFS= read -r module; do
     [[ -n "$module" ]] || continue
@@ -1177,7 +1185,9 @@ run_arm64_chroot '
         "${basic_packages[@]}"
         cloud-guest-utils
         device-tree-compiler
+        dialog
         e2fsprogs
+        ethtool
         gdisk
         initramfs-tools
         iw
@@ -1186,7 +1196,9 @@ run_arm64_chroot '
         librtui
         mtd-utils
         network-manager
+        nvme-cli
         openssl
+        pciutils
         pkexec
         python3
         python3-yaml
@@ -1197,6 +1209,7 @@ run_arm64_chroot '
         u-boot-radxa-cubie-a5e
         tzdata
         u-boot-menu
+        util-linux
         wget
         whiptail
         wireless-regdb
@@ -1255,6 +1268,22 @@ run_arm64_chroot '
     test -s /usr/share/bash-completion/bash_completion
     test -s /usr/lib/firmware/regulatory.db-upstream
     test -s /usr/lib/firmware/regulatory.db.p7s-upstream
+
+    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+    for command_name in \
+        blkid \
+        ethtool \
+        iw \
+        lspci \
+        nvme \
+        rfkill; do
+        command -v "$command_name" >/dev/null 2>&1 || {
+            printf "Required field diagnostic command is unavailable: %s\n" \
+                "$command_name" >&2
+            exit 1
+        }
+    done
 '
 
 validate_radxa_uboot_runtime
@@ -1518,6 +1547,7 @@ run_arm64_chroot '
     rsetup_packages=(
         device-tree-compiler
         dialog
+        ethtool
         gdisk
         iw
         jq
@@ -1525,7 +1555,9 @@ run_arm64_chroot '
         librtui
         mtd-utils
         network-manager
+        nvme-cli
         openssl
+        pciutils
         pkexec
         python3
         python3-yaml
@@ -1534,6 +1566,7 @@ run_arm64_chroot '
         tar
         tzdata
         u-boot-menu
+        util-linux
         wget
         whiptail
         wpasupplicant
@@ -1884,6 +1917,27 @@ local -a supplementary_groups=()
 
 log "Enforcing the fixed initbox administrator password and disabling automatic root login."
 
+install -D -m 0644 /dev/null "$ROOT_MNT$ADMIN_PATH_PROFILE"
+cat >"$ROOT_MNT$ADMIN_PATH_PROFILE" <<'EOF'
+# Cubie A5E interactive shell policy.
+# Debian keeps several field-diagnostic tools in sbin directories. Keep those
+# directories visible to the normal initbox administrator without requiring
+# users to know the absolute path to ethtool, iw, rfkill, blkid or nvme.
+case ":${PATH}:" in
+    *:/usr/local/sbin:*) ;;
+    *) PATH="/usr/local/sbin:${PATH}" ;;
+esac
+case ":${PATH}:" in
+    *:/usr/sbin:*) ;;
+    *) PATH="/usr/sbin:${PATH}" ;;
+esac
+case ":${PATH}:" in
+    *:/sbin:*) ;;
+    *) PATH="/sbin:${PATH}" ;;
+esac
+export PATH
+EOF
+
 run_arm64_chroot "
     if ! id -u '$INITBOX_USER' >/dev/null 2>&1; then
         if ! getent group '$INITBOX_USER' >/dev/null 2>&1; then
@@ -2049,6 +2103,29 @@ done < <(
 grep -Fxq 'CONSOLE_LOGIN=prompt' \
     "$ROOT_MNT$INITBOX_ACCOUNT_STATUS" ||
     die "The initbox console login policy marker is invalid."
+
+require_nonempty_file "$ROOT_MNT$ADMIN_PATH_PROFILE"
+
+run_arm64_chroot "
+    login_path=\"\$(su - '$INITBOX_USER' -c 'printf %s \"\$PATH\"')\"
+
+    case ":\$login_path:" in
+        *:/usr/sbin:*) ;;
+        *)
+            printf '%s\n' 'initbox login PATH does not include /usr/sbin.' >&2
+            exit 1
+            ;;
+    esac
+
+    su - '$INITBOX_USER' -c '
+        command -v ethtool >/dev/null 2>&1 &&
+        command -v iw >/dev/null 2>&1 &&
+        command -v rfkill >/dev/null 2>&1 &&
+        command -v blkid >/dev/null 2>&1 &&
+        command -v lspci >/dev/null 2>&1 &&
+        command -v nvme >/dev/null 2>&1
+    '
+" || die "initbox login environment cannot find the required field diagnostic commands."
 }
 
 validate_rsetup_runtime() {
@@ -2605,6 +2682,8 @@ printf 'Radxa Cubie A5E U-Boot maintenance payload: %s\n' "$RADXA_UBOOT_VERSION"
 printf 'Radxa U-Boot setup backend: %s/setup.sh\n' "$RADXA_UBOOT_PAYLOAD_DIR"
 printf 'Automatic SPI flashing during image build: no\n'
 printf 'Raspberry Pi OS Lite compatible base utilities installed: yes\n'
+printf 'Field diagnostics installed: ethtool iw rfkill pciutils nvme-cli util-linux\n'
+printf 'initbox administrative PATH policy installed: %s\n' "$ADMIN_PATH_PROFILE"
 printf 'Basic package manifest: %s\n' "$BASIC_PACKAGES_TARGET"
 printf 'Stage 60 runtime rootfs cache status: %s\n' "$RUNTIME_CACHE_STATUS"
 printf 'Stage 60 runtime rootfs cache fingerprint: %s\n' "$RUNTIME_CACHE_FINGERPRINT"
@@ -2631,7 +2710,7 @@ printf 'Managed Cubie A5E entry default: yes\n'
 }
 
 main() {
-log "Stage 60 revision: managed-kernel-lts-ready-v1-20260822"
+log "Stage 60 revision: managed-kernel-lts-field-runtime-v2-20260822"
 require_command awk
 require_command blkid
 require_command chroot
@@ -2734,6 +2813,7 @@ log "Installed and smoke-tested rsetup with signed Cubie A5E updates and NVMe mi
 log "Installed mtd-utils and the official Radxa Cubie A5E U-Boot $RADXA_UBOOT_VERSION maintenance payload."
 log "SPI firmware is not flashed automatically; rsetup remains the explicit firmware update gate."
 log "Installed the Raspberry Pi OS Lite compatible base utility set."
+log "Installed field diagnostics and the initbox administrative PATH policy."
 log "Installed one-time automatic root filesystem expansion."
 log "Cleaned disposable target APT caches to reduce image size."
 log "Configured initbox with fixed password init, no password expiry and passwordless sudo."
