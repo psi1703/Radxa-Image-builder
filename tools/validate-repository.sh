@@ -287,8 +287,12 @@ require_text 'merge-base --is-ancestor' "$STAGE30" \
     "Stage 30 does not validate the pinned 6.18.45 commit as the kernel-tree ancestor."
 reject_text 'HEAD must equal' "$STAGE30" \
     "Stage 30 still contains the obsolete pristine-HEAD source-pin assumption."
-reject_text '--enable REALTEK_PHY' "$STAGE30" \
-    "Stage 30 still explicitly enables the irrelevant Realtek PHY driver; Cubie A5E uses Maxio PHY ID 0x7b744412."
+reject_text 'REALTEK_PHY' "$STAGE30" \
+    "Stage 30 still references the irrelevant Realtek PHY driver; Cubie A5E uses Maxio PHY ID 0x7b744412."
+require_text 'Maxio MAE0621A/B-Q3C(I)' "$STAGE30" \
+    "Stage 30 does not document the field-identified Maxio Ethernet PHY."
+require_text 'CONFIG_PHYLIB' "$STAGE30" \
+    "Stage 30 does not retain PHYLIB for the generic Maxio PHY binding."
 
 require_text 'fix-linux-6.17-build.patch' "$STAGE40" \
     "Stage 40 does not apply the AIC8800 Linux 6.17+ compatibility patch required by 6.18."
@@ -385,27 +389,16 @@ require_text \
     'Field diagnostics installed: ethtool iw rfkill pciutils nvme-cli util-linux' \
     "$STAGE60" \
     "Stage 60 does not record the required field diagnostic package set."
-require_text 'Required field diagnostic command is unavailable:' \
-    "$STAGE60" \
-    "Stage 60 does not validate the required field diagnostic commands."
-require_text "command -v ethtool" "$STAGE60" \
-    "Stage 60 does not validate ethtool in the target runtime."
-require_text "command -v iw" "$STAGE60" \
-    "Stage 60 does not validate iw in the target runtime."
-require_text "command -v rfkill" "$STAGE60" \
-    "Stage 60 does not validate rfkill in the target runtime."
-require_text "command -v blkid" "$STAGE60" \
-    "Stage 60 does not validate blkid in the target runtime."
-require_text "command -v lspci" "$STAGE60" \
-    "Stage 60 does not validate lspci in the target runtime."
-require_text "command -v nvme" "$STAGE60" \
-    "Stage 60 does not validate nvme-cli in the target runtime."
-require_text 'su - '''$INITBOX_USER''' -c' "$STAGE60" \
-    "Stage 60 does not validate the field tools through the initbox login environment."
-require_text \
-    'apt-get             -o Dpkg::Options::=--force-confdef' \
-    "$STAGE60" \
+for runtime_command in blkid ethtool iw lspci nvme rfkill; do
+    require_text "command -v $runtime_command" "$STAGE60" \
+        "Stage 60 does not validate required runtime command: $runtime_command"
+done
+require_text "su - '$INITBOX_USER' -c" "$STAGE60" \
+    "Stage 60 does not validate field commands through the initbox login environment."
+require_text '--force-confdef' "$STAGE60" \
     "Stage 60 does not retain noninteractive dpkg conffile handling."
+require_text '--force-confold' "$STAGE60" \
+    "Stage 60 does not retain the keep-current-conffile policy."
 
 # ---------------------------------------------------------------------------
 # NVMe installer: proven boot-chain and rootfs invariants
