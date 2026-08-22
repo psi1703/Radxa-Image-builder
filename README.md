@@ -1,6 +1,6 @@
-# Radxa Cubie A5E Debian 13 / Linux 6.16 Image Builder
+# Radxa Cubie A5E Debian 13 / Linux 6.18 LTS Image Builder
 
-This repository rebuilds the hardware-validated Radxa Cubie A5E image from a clean clone. It preserves Radxa's known-good boot chain, replaces the vendor userspace with Debian 13, builds one managed Linux 6.16 kernel, applies the required Cubie A5E kernel and DTB support, and builds the Radxa AIC8800 SDIO driver.
+This repository builds the Radxa Cubie A5E image from a clean clone. It preserves Radxa's known-good boot chain, replaces the vendor userspace with Debian 13, builds one managed Linux 6.18.y LTS kernel from an exact pinned linux-stable release, applies the required Cubie A5E kernel and DTB support, and builds the Radxa AIC8800 SDIO driver. The current source pin is Linux 6.18.45 LTS. The previously validated Linux 6.16 board result remains the hardware baseline until the first 6.18.45 image completes the same board validation gates.
 
 The top-level `build-cubie-a5e.sh` script is both the interactive build manager and the non-interactive build wrapper. It supports:
 
@@ -27,6 +27,7 @@ The generated image creates the local account `initbox` with password `****`. Th
 Radxa-Image-builder/
 |-- build-cubie-a5e.sh             # interactive build manager and top-level build wrapper
 |-- 10-...sh through 80-...sh      # ordered build, installation and validation stages
+|   `-- 60-install-managed-kernel.sh # version-neutral managed-kernel installation stage
 |-- base/                           # donor-image and Debian rootfs writer
 |-- assets/                         # board runtime assets installed into the generated image
 |-- config/source-pins.env          # pinned upstream refs, versions and donor checksum
@@ -137,8 +138,8 @@ The wrapper creates a sparse raw image and attaches it to a temporary loop devic
 Successful output:
 
 ```text
-/home/psi/cubie-a5e-debian13-linux6.16-<build-id>.img.xz
-/home/psi/cubie-a5e-debian13-linux6.16-<build-id>.img.xz.sha256
+/home/psi/cubie-a5e-debian13-linux6.18.45-<build-id>.img.xz
+/home/psi/cubie-a5e-debian13-linux6.18.45-<build-id>.img.xz.sha256
 ```
 
 The `.img.xz` is a complete disk image containing the Radxa boot chain and all three partitions. Select it directly in Balena Etcher and flash it to an SD card or SSD whose capacity is at least `IMAGE_SIZE_GIB`.
@@ -265,7 +266,7 @@ After a successful migration, power the board off completely, remove the microSD
 
 | Input | Pin |
 | --- | --- |
-| Linux | Tag `v6.16`, commit `038d61fd642278bab63ee8ef722c50d10ab01e8f` |
+| Linux | `linux-stable` tag `v6.18.45`, commit `bf3be28f6721e24961992ebb9e61c0cf21a56806` |
 | Radxa AIC8800 | Tag `5.0+git20260123.5f7be68d-7`, commit `6e076049b719ac2ff7ce5c92786a680407b11cdb` |
 | Radxa donor image | Release `rsdk-r7`, with its SHA-512 pinned in `config/source-pins.env` |
 
@@ -276,12 +277,12 @@ The build stages verify their required upstream commits and pinned source state 
 | Output | Path |
 | --- | --- |
 | Build logs | `build/logs/<build-id>/` |
-| Kernel tree | `build/linux-6.16-one-shot/` |
+| Kernel tree | `build/linux-6.18.45-one-shot/` |
 | AIC8800 tree | `build/aic8800-radxa/` |
 | Validated build-cache metadata | `build/cache/` |
 | Debian rootfs | `build/rootfs/` |
 | Signed update bundles | `build/update-bundles/` |
-| Flashable image and checksum | `/home/psi/cubie-a5e-debian13-linux6.16-<build-id>.img.xz{,.sha256}` |
+| Flashable image and checksum | `/home/psi/cubie-a5e-debian13-linux6.18.45-<build-id>.img.xz{,.sha256}` |
 | Private update signing identity | `build/update-signing/` |
 
 ## Validate repository contents
@@ -302,8 +303,10 @@ The checker runs Bash parsing, ShellCheck when installed, executable-mode checks
 
 ## Tested hardware state
 
-The completed image was boot-tested with kernel `6.16.0+cubie-a5e.20260728T094708Z+`. The `initbox` login worked, `ping` and `nano` were present, systemd reported zero failed units, `eth1` linked, and `eth0` and `wlan0` appeared under their expected names.
+The last completed hardware baseline was boot-tested with the managed Linux 6.16 kernel before the LTS migration. The `initbox` login worked, `ping` and `nano` were present, systemd reported zero failed units, `eth1` linked, and `eth0` and `wlan0` appeared under their expected names.
 
-The SD-to-NVMe migration path has also been validated with the SD card removed: SPI U-Boot started the NVMe boot chain, Debian mounted `/dev/nvme0n1p3` as `/`, the kernel command line used the migrated NVMe root UUID, and systemd reported zero failed units.
+The SD-to-NVMe migration path was also validated with the SD card removed: SPI U-Boot started the NVMe boot chain, Debian mounted `/dev/nvme0n1p3` as `/`, the kernel command line used the migrated NVMe root UUID, and systemd reported zero failed units.
+
+The current build target is Linux 6.18.45 LTS. That target must pass the same Stage 80 and on-board boot/network/Wi-Fi/SPI/NVMe checks before it replaces the 6.16 result as the validated hardware baseline.
 
 See `docs/VALIDATED-HARDWARE.md` for the recorded board result. The repository is licensed under the included MIT `LICENSE` file.
