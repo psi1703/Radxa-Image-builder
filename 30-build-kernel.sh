@@ -318,9 +318,17 @@ validate_kernel_source_pin() {
     [[ "$LINUX_EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
         die "LINUX_EXPECTED_COMMIT is not a full 40-character Git commit."
 
+    git -C "$KERNEL_DIR" cat-file -e "${LINUX_EXPECTED_COMMIT}^{commit}" 2>/dev/null ||
+        die "Pinned kernel base commit is not present in the source tree: $LINUX_EXPECTED_COMMIT"
+
     actual_commit="$(git -C "$KERNEL_DIR" rev-parse HEAD)"
-    [[ "$actual_commit" == "$LINUX_EXPECTED_COMMIT" ]] ||
-        die "Kernel source commit mismatch: expected $LINUX_EXPECTED_COMMIT, got $actual_commit"
+
+    if ! git -C "$KERNEL_DIR" merge-base --is-ancestor \
+        "$LINUX_EXPECTED_COMMIT" "$actual_commit"; then
+        die "Kernel tree HEAD $actual_commit is not based on pinned $LINUX_REF commit $LINUX_EXPECTED_COMMIT"
+    fi
+
+    log "Validated pinned kernel base $LINUX_REF ($LINUX_EXPECTED_COMMIT) beneath tree HEAD $actual_commit."
 }
 
 determine_kernel_release() {
@@ -607,7 +615,8 @@ write_reports() {
         printf 'Kernel build report\n'
         printf '===================\n'
         printf 'Kernel source ref: %s\n' "$LINUX_REF"
-        printf 'Kernel source commit: %s\n' "$LINUX_EXPECTED_COMMIT"
+        printf 'Kernel base commit: %s\n' "$LINUX_EXPECTED_COMMIT"
+        printf 'Kernel tree HEAD: %s\n' "$(git -C "$KERNEL_DIR" rev-parse HEAD)"
         printf 'Kernel release: %s\n' "$KERNEL_RELEASE"
         printf 'Kernel input fingerprint: %s\n' "$KERNEL_INPUT_FINGERPRINT"
         printf 'Validated kernel cache reused: %s\n' "$KERNEL_CACHE_REUSED"
