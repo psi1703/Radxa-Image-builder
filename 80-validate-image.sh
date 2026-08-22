@@ -16,6 +16,8 @@ export STAGE_NAME="VALIDATE"
 : "${KERNEL_DIR:?KERNEL_DIR is not set}"
 : "${AIC_REPO:?AIC_REPO is not set}"
 : "${TARGET_DEVICE:?TARGET_DEVICE is not set}"
+: "${LINUX_REF:?LINUX_REF is not set}"
+: "${LINUX_EXPECTED_COMMIT:?LINUX_EXPECTED_COMMIT is not set}"
 
 readonly TARGET_LAYOUT_FILE="$BUILD_ROOT/.one-shot-target-layout"
 readonly LAYOUT_CANDIDATES_FILE="$BUILD_ROOT/.one-shot-layout-candidates"
@@ -64,6 +66,10 @@ readonly ROOT_GROW_MARKER="/var/lib/cubie-a5e/rootfs-expanded"
 readonly RADXA_UBOOT_VERSION="${RADXA_UBOOT_VERSION:-2018.07-17}"
 readonly RADXA_UBOOT_PAYLOAD_DIR="/usr/lib/u-boot/radxa-cubie-a5e"
 readonly EXPECTED_SPI_FREQUENCY="20000000"
+readonly KERNEL_BASE_RELEASE="${LINUX_REF#v}"
+readonly GMAC1_STAGE_STAMP="$KERNEL_DIR/.cubie-a5e-gmac1-dts-backport"
+readonly PCIE_STAGE_STAMP="$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts"
+readonly SPI_STAGE_STAMP="$KERNEL_DIR/.cubie-a5e-a523-spi-backport"
 readonly MINIMUM_ROOT_AVAILABLE_BYTES=$((512 * 1024 * 1024))
 
 if [[ -n "${LOG_DIR:-}" ]]; then
@@ -113,8 +119,7 @@ module_vermagic() {
 local module_path="$1"
 
 strings "$module_path" |
-    sed -n 's/^vermagic=//p' |
-    head -n 1
+    sed -n 's/^vermagic=//p'
 
 }
 
@@ -462,8 +467,8 @@ grep -q "^${PCIE_MODULE_REL}:" "$module_root/modules.dep" ||
     die "The PCIe host module is absent from modules.dep."
 
 if nm -u "$external_dir/aic8800_bsp.ko" |
-    grep -Eq \
-        '[[:space:]]U (sunxi_mmc_rescan_card|sunxi_wlan_get_bus_index|sunxi_wlan_set_power|sunxi_wlan_get_oob_irq)$'; then
+    grep -E \
+        '[[:space:]]U (sunxi_mmc_rescan_card|sunxi_wlan_get_bus_index|sunxi_wlan_set_power|sunxi_wlan_get_oob_irq)$' >/dev/null; then
     die "Installed AIC8800 BSP still imports obsolete Allwinner RFKill/rescan symbols."
 fi
 
@@ -1346,7 +1351,7 @@ packaged_kernels="$(
 
 if find "$ROOT_MNT" "$BOOT_MNT" \
     -xdev \
-    \( -name '*5.15.147-20-aw2501*' -o -name 'extlinux.conf.before-6.16' \) \
+    \( -name '*5.15.147-20-aw2501*' -o -name 'extlinux.conf.before-*' \) \
     -print -quit |
     grep -q .; then
     die "Linux 5.15 kernel or recovery artifacts remain installed."
@@ -1551,7 +1556,7 @@ grep -Eq \
     "$extlinux" ||
     die "Managed entry does not use the target root UUID."
 
-linux_616_append="$(
+managed_append="$(
     awk '
         /^[[:space:]]*label[[:space:]]+cubie-a5e[[:space:]]*$/ {
             inside = 1
@@ -1570,7 +1575,7 @@ linux_616_append="$(
     ' "$extlinux"
 )"
 
-[[ -n "$linux_616_append" ]] ||
+[[ -n "$managed_append" ]] ||
     die "Managed append line is missing."
 
 for required_argument in \
@@ -1579,12 +1584,12 @@ for required_argument in \
     'ignore_loglevel' \
     'loglevel=8'; do
     grep -Eq "(^|[[:space:]])${required_argument}([[:space:]]|$)" \
-        <<<"$linux_616_append" ||
+        <<<"$managed_append" ||
         die "Managed append line is missing: $required_argument"
 done
 
 if grep -Eq '(^|[[:space:]])(console=ttyAS0,115200n8|earlyprintk=sunxi-uart,0x2500000|quiet|splash|loglevel=4|earlycon)([[:space:]]|$)' \
-    <<<"$linux_616_append"; then
+    <<<"$managed_append"; then
     die "Managed append line still contains vendor or suppressed-console arguments."
 fi
 
@@ -1902,6 +1907,12 @@ gmac1_phy_supply="$(
 [[ "$gmac1_phy_supply" == "$cldo4_phandle" ]] ||
     die "Installed DTB does not connect GMAC1 PHY power to CLDO4."
 
+[[ "$(fdtget -t u \
+    "$target_dtb" \
+    /soc/i2c@7081400/pmic@34/regulators/cldo4 \
+    regulator-enable-ramp-delay)" == "150000" ]] ||
+    die "Installed DTB does not retain the 150 ms GMAC1 PHY supply ramp delay."
+
 IFS=' ' read -r reset_gpio_phandle reset_bank reset_pin reset_flags < <(
     fdtget -t x \
         "$target_dtb" \
@@ -2081,6 +2092,58 @@ wifi_interrupt_parent="$(
 }
 
 validate_build_tree() {
+local kernel_head
+
+[[ "$LINUX_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "LINUX_REF must pin an exact kernel point release: $LINUX_REF"
+[[ "$LINUX_EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+    die "LINUX_EXPECTED_COMMIT must be a full 40-character Git commit."
+[[ -d "$KERNEL_DIR/.git" ]] ||
+    die "Kernel source tree is not a Git worktree: $KERNEL_DIR"
+
+git -C "$KERNEL_DIR" cat-file -e "${LINUX_EXPECTED_COMMIT}^{commit}" 2>/dev/null ||
+    die "Pinned kernel base commit is missing from the build tree: $LINUX_EXPECTED_COMMIT"
+
+kernel_head="$(git -C "$KERNEL_DIR" rev-parse HEAD)"
+if ! git -C "$KERNEL_DIR" merge-base --is-ancestor \
+    "$LINUX_EXPECTED_COMMIT" "$kernel_head"; then
+    die "Kernel tree HEAD $kernel_head is not based on pinned $LINUX_REF commit $LINUX_EXPECTED_COMMIT"
+fi
+
+case "$KERNEL_RELEASE" in
+    "$KERNEL_BASE_RELEASE" | "$KERNEL_BASE_RELEASE"+*) ;;
+    *)
+        die "Installed kernel release $KERNEL_RELEASE does not match pinned $LINUX_REF."
+        ;;
+esac
+
+require_nonempty_file "$GMAC1_STAGE_STAMP"
+require_nonempty_file "$PCIE_STAGE_STAMP"
+require_nonempty_file "$SPI_STAGE_STAMP"
+
+grep -Fxq "baseline=$LINUX_REF" "$GMAC1_STAGE_STAMP" ||
+    die "GMAC1 Stage 20 stamp does not match $LINUX_REF."
+grep -Fxq "baseline_commit=$LINUX_EXPECTED_COMMIT" "$GMAC1_STAGE_STAMP" ||
+    die "GMAC1 Stage 20 stamp does not match the pinned kernel commit."
+grep -Fxq 'status=complete' "$GMAC1_STAGE_STAMP" ||
+    die "GMAC1 Stage 20 stamp is incomplete."
+
+grep -Fxq "linux_ref=$LINUX_REF" "$PCIE_STAGE_STAMP" ||
+    die "PCIe Stage 22 stamp does not match $LINUX_REF."
+grep -Fxq "linux_base_commit=$LINUX_EXPECTED_COMMIT" "$PCIE_STAGE_STAMP" ||
+    die "PCIe Stage 22 stamp does not match the pinned kernel commit."
+grep -Fxq 'dt_layout=mainline-soc-one-cell-v4' "$PCIE_STAGE_STAMP" ||
+    die "PCIe Stage 22 DT layout marker is incorrect."
+grep -Fxq 'driver_mode=initramfs-modules-v4' "$PCIE_STAGE_STAMP" ||
+    die "PCIe Stage 22 module marker is incorrect."
+
+grep -Fxq "linux_ref=$LINUX_REF" "$SPI_STAGE_STAMP" ||
+    die "SPI Stage 27 stamp does not match $LINUX_REF."
+grep -Fxq "linux_base_commit=$LINUX_EXPECTED_COMMIT" "$SPI_STAGE_STAMP" ||
+    die "SPI Stage 27 stamp does not match the pinned kernel commit."
+grep -Fxq 'status=complete' "$SPI_STAGE_STAMP" ||
+    die "SPI Stage 27 stamp is incomplete."
+
 require_nonempty_file "$KERNEL_CONFIG"
 require_nonempty_file "$SOC_DTSI"
 require_nonempty_file "$BOARD_DTS"
@@ -2225,6 +2288,9 @@ fi
 grep -qF 'phy-supply = <&reg_cldo4>;' "$BOARD_DTS" ||
     die "GMAC1 CLDO4 PHY supply is missing from the source DTS."
 
+grep -qF 'regulator-enable-ramp-delay = <150000>;' "$BOARD_DTS" ||
+    die "GMAC1 CLDO4 PHY supply ramp delay is missing from the source DTS."
+
 grep -qF 'tx-internal-delay-ps = <300>;' "$BOARD_DTS" ||
     die "GMAC1 driver-compatible TX delay is missing."
 
@@ -2341,6 +2407,8 @@ printf 'Cubie A5E image validation report\n'
 printf '=================================\n'
 printf 'Status: PASS\n'
 printf 'Kernel release: %s\n' "$KERNEL_RELEASE"
+printf 'Kernel LTS pin: %s\n' "$LINUX_REF"
+printf 'Kernel base commit: %s\n' "$LINUX_EXPECTED_COMMIT"
 printf 'Target device: %s\n' "$TARGET_DEVICE"
 printf 'Root partition: %s\n' "$ROOT_PART"
 printf 'Boot partition: %s\n' "$BOOT_PART"
@@ -2395,7 +2463,8 @@ printf 'AIC8800 Bluetooth module excluded: yes\n'
 printf 'AIC8800 firmware present: yes\n'
 printf 'Obsolete AIC8800 module aliases absent: yes\n'
 printf 'AXP313/AXP323 regulator device-ID conflict fixed: yes\n'
-printf 'PCK600 PD_VO1 built and wired: yes\n'
+printf 'Linux 6.18 upstream PCK600 support validated: yes\n'
+printf 'GMAC1 DTS backport validated: yes\n'
 printf 'GMAC1 pinmux function and numeric mux validated: yes\n'
 printf 'GMAC1 internal delays validated: yes\n'
 printf 'GMAC1 CLDO4 and PJ16 wiring validated: yes\n'
@@ -2404,7 +2473,7 @@ printf 'Wi-Fi BLDO1 1.8 V I/O rail validated: yes\n'
 printf 'Wi-Fi PM1 reset sequence validated: yes\n'
 printf 'MMC pwrseq_simple reset-gpios backport validated: yes\n'
 printf 'Wi-Fi PM0 host-wake interrupt validated: yes\n'
-printf 'A523 pinctrl IRQ backports validated: yes\n'
+printf 'A523 pinctrl IRQ baseline validated: yes\n'
 printf 'Vendor RFKill/rescan DT node absent: yes\n'
 printf 'Wi-Fi SDIO clock capped at tested 40 MHz: yes\n'
 printf 'Duplicate Wi-Fi loader absent: yes\n'
@@ -2417,7 +2486,7 @@ printf 'Inapplicable EFI automount masked: yes\n'
 printf 'Timezone: Asia/Dubai\n'
 printf 'Installed DTB validated: yes\n'
 printf 'PCIe/PHY initramfs modules validated: yes\n'
-printf 'A523 SPI0 and SPI-NOR DT wiring validated: yes\n'
+printf 'A523 SPI0 6.18 backport and SPI-NOR DT wiring validated: yes\n'
 printf 'SPI-NOR maximum frequency: %s Hz\n' "$EXPECTED_SPI_FREQUENCY"
 printf 'mtd-utils installed: yes\n'
 printf 'Radxa Cubie A5E U-Boot maintenance payload: %s\n' "$RADXA_UBOOT_VERSION"
@@ -2451,6 +2520,7 @@ require_command dtc
 require_command fdtget
 require_command find
 require_command grep
+require_command git
 require_command head
 require_command lsblk
 require_command mount
@@ -2483,10 +2553,16 @@ UPDATE_VERSION="$(tr -d '[:space:]' <"$UPDATE_VERSION_FILE")"
 
 [[ -n "$KERNEL_RELEASE" ]] ||
     die "Kernel release file is empty."
+case "$KERNEL_RELEASE" in
+    "$KERNEL_BASE_RELEASE" | "$KERNEL_BASE_RELEASE"+*) ;;
+    *)
+        die "Kernel release $KERNEL_RELEASE does not match pinned $LINUX_REF."
+        ;;
+esac
 [[ "$UPDATE_VERSION" =~ ^[A-Za-z0-9._+:-]+$ ]] ||
     die "Update version is invalid: $UPDATE_VERSION"
 
-log "Stage 80 revision: storage-nvme-spi-cleanlog-v3-20260821"
+log "Stage 80 revision: linux-6.18-lts-validation-v1-20260822"
 log "Beginning clean read-only target validation."
 
 load_target_layout
