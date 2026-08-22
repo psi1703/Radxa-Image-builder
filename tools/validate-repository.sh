@@ -9,7 +9,6 @@ readonly PROJECT_ROOT
 
 readonly SOURCE_PINS="$PROJECT_ROOT/config/source-pins.env"
 readonly STAGE27="$PROJECT_ROOT/27-backport-spi.sh"
-readonly STAGE46="$PROJECT_ROOT/46-build-apt-update-repository.sh"
 readonly STAGE60="$PROJECT_ROOT/60-install-linux-6.16.sh"
 readonly STAGE80="$PROJECT_ROOT/80-validate-image.sh"
 readonly NVME_INSTALLER="$PROJECT_ROOT/assets/cubie-a5e-install-nvme"
@@ -55,7 +54,6 @@ reject_text() {
 for required in \
     "$SOURCE_PINS" \
     "$STAGE27" \
-    "$STAGE46" \
     "$STAGE60" \
     "$STAGE80" \
     "$NVME_INSTALLER" \
@@ -111,22 +109,19 @@ readonly source_scan_files
 
 legacy_user="psi"
 forbidden_legacy_path="/home/${legacy_user}/cubie-a5e-build"
-if grep -Il -- "$forbidden_legacy_path" "${source_scan_files[@]}" |
-    grep -q .; then
+if [[ -n "$(grep -Il -- "$forbidden_legacy_path" "${source_scan_files[@]}" || true)" ]]; then
     fail "A host-specific legacy home path remains in an active source file."
 fi
 
-if find "$PROJECT_ROOT" \
+if [[ -n "$(find "$PROJECT_ROOT" \
     -path "$PROJECT_ROOT/build" -prune -o \
-    -type f -size +10M -print -quit |
-    grep -q .; then
+    -type f -size +10M -print -quit)" ]]; then
     fail "A file larger than 10 MiB is present outside build/."
 fi
 
-if find "$PROJECT_ROOT" \
+if [[ -n "$(find "$PROJECT_ROOT" \
     -path "$PROJECT_ROOT/build" -prune -o \
-    -type f \( -iname '*private*.pem' -o -iname '*.key' \) -print -quit |
-    grep -q .; then
+    -type f \( -iname '*private*.pem' -o -iname '*.key' \) -print -quit)" ]]; then
     fail "A possible private key is present in repository content."
 fi
 
@@ -171,44 +166,54 @@ source "$SOURCE_PINS"
     fail "Radxa common and board U-Boot SHA256 pins unexpectedly match."
 
 # ---------------------------------------------------------------------------
+# Abandoned custom Cubie APT delivery must stay removed
+# ---------------------------------------------------------------------------
+[[ ! -e "$PROJECT_ROOT/46-build-apt-update-repository.sh" ]] ||
+    fail "Obsolete Stage 46 custom APT repository builder is still present."
+[[ ! -e "$PROJECT_ROOT/cubie-build-menu.sh" ]] ||
+    fail "Standalone cubie-build-menu.sh is obsolete; the menu belongs in build-cubie-a5e.sh."
+
+for apt_removed_file in "$SOURCE_PINS" "$STAGE60" "$STAGE80" "$RSETUP_WRAPPER" "$BUILD_WRAPPER"; do
+    reject_text 'CUBIE_APT_REPO_URL' "$apt_removed_file" \
+        "Custom Cubie APT repository URL logic remains in ${apt_removed_file#$PROJECT_ROOT/}."
+    reject_text 'CUBIE_BOARD_SUPPORT_VERSION' "$apt_removed_file" \
+        "Custom Cubie board-support package logic remains in ${apt_removed_file#$PROJECT_ROOT/}."
+done
+reject_text 'cubie-a5e-board-support' "$STAGE60" \
+    "Stage 60 still contains the abandoned custom board-support package bootstrap."
+reject_text 'cubie-a5e-kernel-update' "$STAGE60" \
+    "Stage 60 still contains the abandoned custom kernel-update package bootstrap."
+
+# ---------------------------------------------------------------------------
 # Pipeline wiring
 # ---------------------------------------------------------------------------
 require_text '"22-backport-pcie.sh"' \
     "$BUILD_WRAPPER" \
     "PCIe backport stage is missing."
-require_text '"46-build-apt-update-repository.sh"' \
+require_text '"45-build-update-bundle.sh"' \
     "$BUILD_WRAPPER" \
-    "APT update-repository stage is missing from the build pipeline."
-require_text 'cubie-a5e-board-support' \
-    "$STAGE46" \
-    "APT stage does not build the managed Cubie board-support package."
-require_text 'cubie-a5e-kernel-update' \
-    "$STAGE46" \
-    "APT stage does not build the managed Cubie kernel update package."
-require_text 'dpkg-scanpackages --multiversion' \
-    "$STAGE46" \
-    "APT stage does not retain/index multiple published update versions."
-require_text '--clearsign' \
-    "$STAGE46" \
-    "APT stage does not generate a signed InRelease file."
-require_text 'CUBIE_BOARD_SUPPORT_VERSION="${CUBIE_BOARD_SUPPORT_VERSION:-1.0.0}"' \
-    "$SOURCE_PINS" \
-    "Cubie A5E board-support package version is missing."
-require_text 'CUBIE_APT_REPO_URL="${CUBIE_APT_REPO_URL:-}"' \
-    "$SOURCE_PINS" \
-    "Optional Cubie A5E APT repository URL setting is missing."
-require_text 'install_apt_update_delivery' \
-    "$STAGE60" \
-    "Stage 60 does not register the APT-managed Cubie update packages."
-require_text 'cubie-a5e-board-support' \
-    "$STAGE60" \
-    "Stage 60 does not install the APT-managed board-support runtime."
-require_text 'Full Debian/Radxa + approved Cubie A5E package upgrade' \
-    "$RSETUP_WRAPPER" \
-    "rsetup does not expose the controlled full-upgrade path."
+    "Signed kernel/board update-bundle stage is missing."
 require_text 'cleanup_failed_image_output' \
     "$BUILD_WRAPPER" \
     "Build wrapper does not remove failed Etcher-image artifacts."
+require_text 'Radxa Cubie A5E Build Manager' \
+    "$BUILD_WRAPPER" \
+    "Integrated build menu is missing from build-cubie-a5e.sh."
+require_text '--menu)' \
+    "$BUILD_WRAPPER" \
+    "build-cubie-a5e.sh does not expose the explicit --menu entry point."
+require_text '--validate)' \
+    "$BUILD_WRAPPER" \
+    "build-cubie-a5e.sh does not expose repository validation through --validate."
+require_text 'BUILD_REQUEST_ENV_PRESENT' \
+    "$BUILD_WRAPPER" \
+    "Build wrapper does not preserve environment-driven non-interactive automation."
+require_text 'Full Debian/Radxa system upgrade' \
+    "$RSETUP_WRAPPER" \
+    "rsetup does not expose the normal Debian/Radxa full-upgrade path."
+require_text 'Cubie A5E signed kernel and board updates' \
+    "$RSETUP_WRAPPER" \
+    "rsetup does not expose the separate signed Cubie kernel/board updater."
 
 require_text 'Install the current Cubie A5E system to NVMe' \
     "$RSETUP_WRAPPER" \
@@ -273,6 +278,12 @@ require_text 'NVME_INSTALLER_SELF_TEST=PASS' \
 require_text 'RADXA_UBOOT_BACKEND=PASS' \
     "$STAGE60" \
     "Stage 60 does not persist the Radxa U-Boot backend validation result."
+require_text '99-cubie-a5e-managed-kernel' \
+    "$STAGE60" \
+    "Stage 60 does not install the generic-kernel replacement guard."
+require_text 'install_update_manager' \
+    "$STAGE60" \
+    "Stage 60 does not install the signed Cubie update manager."
 
 # ---------------------------------------------------------------------------
 # NVMe installer: proven boot-chain and rootfs invariants
@@ -304,6 +315,18 @@ require_text \
     'On-board SPI firmware does not contain the installed Cubie A5E U-Boot' \
     "$NVME_INSTALLER" \
     "NVMe installer does not reject an outdated on-board SPI image."
+require_text 'grep -F -- "$expected_marker" >/dev/null' \
+    "$NVME_INSTALLER" \
+    "NVMe installer is missing the pipefail-safe SPI U-Boot marker check."
+reject_text 'grep -Fq -- "$expected_marker"' \
+    "$NVME_INSTALLER" \
+    "NVMe installer has regressed to grep -q in the streaming SPI validation pipeline."
+require_text "grep -E '^Attribute flags:" \
+    "$NVME_INSTALLER" \
+    "NVMe installer is missing the GPT attribute validation."
+reject_text "grep -Eq '^Attribute flags:" \
+    "$NVME_INSTALLER" \
+    "NVMe installer has regressed to grep -q in the sgdisk validation pipeline."
 require_text 'normalize_target_runtime_layout' \
     "$NVME_INSTALLER" \
     "NVMe installer lacks target runtime mountpoint normalization."
@@ -376,6 +399,9 @@ require_text 'RADXA_UBOOT_BACKEND=PASS' \
 require_text 'OUTPUT_MODE="${OUTPUT_MODE:-device}"' \
     "$BUILD_WRAPPER" \
     "Direct-device output default is missing."
+require_text 'REQUESTED_TARGET_DEVICE="${TARGET_DEVICE:-}"' \
+    "$BUILD_WRAPPER" \
+    "Build wrapper does not retain explicit-target detection for safe device writes."
 require_text 'device | etcher-image)' \
     "$BUILD_WRAPPER" \
     "Dual output-mode validation is missing."
