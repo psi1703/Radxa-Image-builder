@@ -1073,14 +1073,18 @@ run_menu_build() {
 
     printf '\n%s\n\n' "$description"
 
+    # The interactive parent initializes and exports TARGET_DEVICE for device-mode
+    # compatibility.  Never let that inherited default leak into a child menu build:
+    # Etcher mode must start with TARGET_DEVICE unset, while device-mode menu choices
+    # may explicitly set TARGET_DEVICE again in "$@" below.
     if [[ "$(id -u)" -eq 0 ]]; then
-        env "$@" "$SCRIPT_DIR/$SCRIPT_NAME"
+        env -u TARGET_DEVICE "$@" "$SCRIPT_DIR/$SCRIPT_NAME"
     else
         command -v sudo >/dev/null 2>&1 || {
             printf 'ERROR: sudo is required to run a build from the menu.\n' >&2
             return 1
         }
-        sudo env "$@" "$SCRIPT_DIR/$SCRIPT_NAME"
+        sudo env -u TARGET_DEVICE "$@" "$SCRIPT_DIR/$SCRIPT_NAME"
     fi
 }
 
