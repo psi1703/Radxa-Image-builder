@@ -158,13 +158,11 @@ install_required_packages() {
         curl
         debootstrap
         device-tree-compiler
-        dpkg-dev
         dwarves
         flex
         file
         gcc-aarch64-linux-gnu
         git
-        gnupg
         gzip
         kmod
         libelf-dev
@@ -226,8 +224,6 @@ validate_host_commands() {
         curl
         debootstrap
         depmod
-        dpkg-deb
-        dpkg-scanpackages
         dpkg-query
         dtc
         find
@@ -235,7 +231,6 @@ validate_host_commands() {
         file
         flock
         git
-        gpg
         grep
         gzip
         head
