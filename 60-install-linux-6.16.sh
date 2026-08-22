@@ -26,6 +26,13 @@ readonly AIC_MODULE_LIST="$BUILD_ROOT/.one-shot-aic-modules"
 readonly UPDATE_VERSION_FILE="$BUILD_ROOT/.one-shot-update-version"
 readonly UPDATE_BUNDLE_FILE="$BUILD_ROOT/.one-shot-update-bundle"
 readonly UPDATE_PUBLIC_KEY_FILE="$BUILD_ROOT/.one-shot-update-public-key"
+readonly APT_PACKAGE_FILE="$BUILD_ROOT/.one-shot-apt-package"
+readonly BOARD_SUPPORT_PACKAGE_FILE="$BUILD_ROOT/.one-shot-board-support-package"
+readonly CUBIE_APT_REPO_URL="${CUBIE_APT_REPO_URL:-}"
+readonly CUBIE_BOARD_SUPPORT_VERSION="${CUBIE_BOARD_SUPPORT_VERSION:-1.0.0}"
+readonly CUBIE_APT_KEY_TARGET="/usr/share/keyrings/cubie-a5e-archive-keyring.gpg"
+readonly CUBIE_APT_SOURCE_TARGET="/etc/apt/sources.list.d/cubie-a5e-updates.sources"
+readonly CUBIE_APT_CHANNEL_STATE="/etc/cubie-a5e-update/apt-channel.env"
 
 readonly IMAGE_SRC="$KERNEL_DIR/arch/arm64/boot/Image"
 readonly CONFIG_SRC="$KERNEL_DIR/.config"
@@ -2225,6 +2232,78 @@ ln -sfn \
     die "Kernel update finalization service was not enabled."
 }
 
+install_apt_update_delivery() {
+local kernel_package
+local board_support_package
+local target_board_package="/tmp/cubie-a5e-board-support-bootstrap.deb"
+local target_kernel_package="/tmp/cubie-a5e-kernel-update-bootstrap.deb"
+local source_target="$ROOT_MNT$CUBIE_APT_SOURCE_TARGET"
+local channel_state="$ROOT_MNT$CUBIE_APT_CHANNEL_STATE"
+local installed_board_version
+local installed_kernel_version
+
+require_nonempty_file "$BOARD_SUPPORT_PACKAGE_FILE"
+require_nonempty_file "$APT_PACKAGE_FILE"
+
+board_support_package="$(<"$BOARD_SUPPORT_PACKAGE_FILE")"
+kernel_package="$(<"$APT_PACKAGE_FILE")"
+
+require_nonempty_file "$board_support_package"
+require_nonempty_file "$kernel_package"
+
+log "Registering the APT-managed Cubie A5E board-support and kernel-update packages."
+
+install -D -m 0644 \
+    "$board_support_package" \
+    "$ROOT_MNT$target_board_package"
+install -D -m 0644 \
+    "$kernel_package" \
+    "$ROOT_MNT$target_kernel_package"
+
+# Board support is installed first because the kernel package depends on it and
+# delegates activation to /usr/local/sbin/cubie-a5e-update. During image
+# construction the signed kernel bundle version already matches active.env, so
+# the kernel package postinst registers the package without reinstalling it.
+run_arm64_chroot \
+    "dpkg -i '$target_board_package'"
+run_arm64_chroot \
+    "dpkg -i '$target_kernel_package'"
+
+rm -f -- \
+    "$ROOT_MNT$target_board_package" \
+    "$ROOT_MNT$target_kernel_package"
+
+installed_board_version="$(
+    run_arm64_chroot \
+        "dpkg-query -W -f='\${Version}' cubie-a5e-board-support" \
+        2>/dev/null || true
+)"
+installed_kernel_version="$(
+    run_arm64_chroot \
+        "dpkg-query -W -f='\${Version}' cubie-a5e-kernel-update" \
+        2>/dev/null || true
+)"
+
+[[ "$installed_board_version" == "$CUBIE_BOARD_SUPPORT_VERSION" ]] ||
+    die "Cubie A5E board-support package version mismatch: $installed_board_version"
+[[ "$installed_kernel_version" == "$UPDATE_VERSION" ]] ||
+    die "Cubie A5E kernel-update package version mismatch: $installed_kernel_version"
+
+require_nonempty_file "$ROOT_MNT$CUBIE_APT_KEY_TARGET"
+require_nonempty_file "$channel_state"
+
+if [[ -n "$CUBIE_APT_REPO_URL" ]]; then
+    require_nonempty_file "$source_target"
+    grep -Fxq "URIs: $CUBIE_APT_REPO_URL" "$source_target" ||
+        die "Installed Cubie A5E APT source URL is incorrect."
+    log "Configured signed Cubie A5E APT update channel: $CUBIE_APT_REPO_URL"
+else
+    [[ ! -e "$source_target" ]] ||
+        die "Cubie A5E APT source was installed without a configured repository URL."
+    log "Cubie A5E APT packages are registered; the remote update channel remains intentionally unconfigured."
+fi
+}
+
 disable_inapplicable_efi_automount() {
 local unit
 
@@ -2652,6 +2731,8 @@ require_nonempty_file "$KERNEL_RELEASE_FILE"
 require_nonempty_file "$UPDATE_VERSION_FILE"
 require_nonempty_file "$UPDATE_BUNDLE_FILE"
 require_nonempty_file "$UPDATE_PUBLIC_KEY_FILE"
+require_nonempty_file "$APT_PACKAGE_FILE"
+require_nonempty_file "$BOARD_SUPPORT_PACKAGE_FILE"
 require_nonempty_file "$IMAGE_SRC"
 require_nonempty_file "$CONFIG_SRC"
 require_nonempty_file "$DTB_SRC"
@@ -2695,6 +2776,7 @@ copy_boot_payload
 update_extlinux
 install_nvme_installer
 install_update_manager
+install_apt_update_delivery
 clean_target_apt_cache
 validate_rsetup_runtime
 
@@ -2706,6 +2788,12 @@ log "Installed Linux $KERNEL_RELEASE."
 log "Set extlinux default to the single cubie-a5e entry."
 log "Removed the official Linux 5.15 kernel and recovery entries."
 log "Installed and smoke-tested rsetup with signed Cubie A5E updates and NVMe migration."
+log "Registered the cubie-a5e-kernel-update package for APT-managed future kernel delivery."
+if [[ -n "$CUBIE_APT_REPO_URL" ]]; then
+    log "Configured signed Cubie A5E APT channel: $CUBIE_APT_REPO_URL"
+else
+    log "Cubie A5E APT channel is not yet configured; set CUBIE_APT_REPO_URL when a repository endpoint is published."
+fi
 log "Installed mtd-utils and the official Radxa Cubie A5E U-Boot $RADXA_UBOOT_VERSION maintenance payload."
 log "SPI firmware is not flashed automatically; rsetup remains the explicit firmware update gate."
 log "Installed the Raspberry Pi OS Lite compatible base utility set."
