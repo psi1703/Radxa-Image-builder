@@ -9,6 +9,7 @@ readonly PROJECT_ROOT
 
 readonly SOURCE_PINS="$PROJECT_ROOT/config/source-pins.env"
 readonly STAGE27="$PROJECT_ROOT/27-backport-spi.sh"
+readonly STAGE46="$PROJECT_ROOT/46-build-apt-update-repository.sh"
 readonly STAGE60="$PROJECT_ROOT/60-install-linux-6.16.sh"
 readonly STAGE80="$PROJECT_ROOT/80-validate-image.sh"
 readonly NVME_INSTALLER="$PROJECT_ROOT/assets/cubie-a5e-install-nvme"
@@ -54,6 +55,7 @@ reject_text() {
 for required in \
     "$SOURCE_PINS" \
     "$STAGE27" \
+    "$STAGE46" \
     "$STAGE60" \
     "$STAGE80" \
     "$NVME_INSTALLER" \
@@ -174,6 +176,39 @@ source "$SOURCE_PINS"
 require_text '"22-backport-pcie.sh"' \
     "$BUILD_WRAPPER" \
     "PCIe backport stage is missing."
+require_text '"46-build-apt-update-repository.sh"' \
+    "$BUILD_WRAPPER" \
+    "APT update-repository stage is missing from the build pipeline."
+require_text 'cubie-a5e-board-support' \
+    "$STAGE46" \
+    "APT stage does not build the managed Cubie board-support package."
+require_text 'cubie-a5e-kernel-update' \
+    "$STAGE46" \
+    "APT stage does not build the managed Cubie kernel update package."
+require_text 'dpkg-scanpackages --multiversion' \
+    "$STAGE46" \
+    "APT stage does not retain/index multiple published update versions."
+require_text '--clearsign' \
+    "$STAGE46" \
+    "APT stage does not generate a signed InRelease file."
+require_text 'CUBIE_BOARD_SUPPORT_VERSION="${CUBIE_BOARD_SUPPORT_VERSION:-1.0.0}"' \
+    "$SOURCE_PINS" \
+    "Cubie A5E board-support package version is missing."
+require_text 'CUBIE_APT_REPO_URL="${CUBIE_APT_REPO_URL:-}"' \
+    "$SOURCE_PINS" \
+    "Optional Cubie A5E APT repository URL setting is missing."
+require_text 'install_apt_update_delivery' \
+    "$STAGE60" \
+    "Stage 60 does not register the APT-managed Cubie update packages."
+require_text 'cubie-a5e-board-support' \
+    "$STAGE60" \
+    "Stage 60 does not install the APT-managed board-support runtime."
+require_text 'Full Debian/Radxa + approved Cubie A5E package upgrade' \
+    "$RSETUP_WRAPPER" \
+    "rsetup does not expose the controlled full-upgrade path."
+require_text 'cleanup_failed_image_output' \
+    "$BUILD_WRAPPER" \
+    "Build wrapper does not remove failed Etcher-image artifacts."
 
 require_text 'Install the current Cubie A5E system to NVMe' \
     "$RSETUP_WRAPPER" \
@@ -322,7 +357,7 @@ require_text 'validate_spi_maintenance_runtime' \
 require_text 'validate_runtime_root_layout' \
     "$STAGE80" \
     "Stage 80 lacks persistent runtime mountpoint/PID1 validation."
-require_text 'storage-nvme-spi-hardening-v2-20260821' \
+require_text 'storage-nvme-spi-cleanlog-v3-20260821' \
     "$STAGE80" \
     "Stage 80 revision does not identify the storage/SPI hardening pass."
 require_text 'for exclusion in dev proc run sys tmp mnt media; do' \
