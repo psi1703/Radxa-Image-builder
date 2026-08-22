@@ -23,16 +23,16 @@ The generated image creates the local account `initbox` with password `init`. Th
 ## Repository layout
 
 ```text
-.
-â”œâ”€â”€ build-cubie-a5e.sh             # top-level build wrapper
-â”œâ”€â”€ 10-...sh through 80-...sh      # ordered build and validation stages
-â”œâ”€â”€ base/                           # donor-image and Debian rootfs writer
-â”œâ”€â”€ assets/                         # small board runtime assets tracked by Git
-â”œâ”€â”€ config/source-pins.env          # pinned upstream refs and donor checksum
-â”œâ”€â”€ docs/                           # build flow and validated hardware record
-â”œâ”€â”€ lib/common.sh                   # shared shell helpers
-â”œâ”€â”€ tools/validate-repository.sh    # optional local source validation
-â””â”€â”€ build/                          # downloads, sources, build state, logs and keys
+Radxa-Image-builder/
+|-- build-cubie-a5e.sh             # top-level build wrapper
+|-- cubie-build-menu.sh            # interactive build/update menu
+|-- 10-...sh through 80-...sh      # ordered build and validation stages
+|-- base/                           # donor-image and Debian rootfs writer
+|-- assets/                         # small board runtime assets tracked by Git
+|-- config/source-pins.env          # pinned upstream refs and donor checksum
+|-- docs/
+|-- tools/
+`-- MANIFEST.sha256
 ```
 
 Downloaded sources, rootfs files, build objects, logs, update bundles, generated APT repositories and signing keys stay under the ignored `build/` directory. In Etcher-image mode, the temporary raw image, final compressed image and checksum are created directly under `/home/psi/`; the temporary raw image is removed after successful compression. No file from the old `/home/psi/cubie-a5e-build` layout is required.
