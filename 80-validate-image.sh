@@ -22,6 +22,13 @@ readonly LAYOUT_CANDIDATES_FILE="$BUILD_ROOT/.one-shot-layout-candidates"
 readonly KERNEL_RELEASE_FILE="$BUILD_ROOT/.one-shot-kernel-release"
 readonly UPDATE_VERSION_FILE="$BUILD_ROOT/.one-shot-update-version"
 readonly UPDATE_BUNDLE_FILE="$BUILD_ROOT/.one-shot-update-bundle"
+readonly APT_PACKAGE_FILE="$BUILD_ROOT/.one-shot-apt-package"
+readonly BOARD_SUPPORT_PACKAGE_FILE="$BUILD_ROOT/.one-shot-board-support-package"
+readonly CUBIE_BOARD_SUPPORT_VERSION="${CUBIE_BOARD_SUPPORT_VERSION:-1.0.0}"
+readonly CUBIE_APT_REPO_URL="${CUBIE_APT_REPO_URL:-}"
+readonly CUBIE_APT_KEY_TARGET="/usr/share/keyrings/cubie-a5e-archive-keyring.gpg"
+readonly CUBIE_APT_SOURCE_TARGET="/etc/apt/sources.list.d/cubie-a5e-updates.sources"
+readonly CUBIE_APT_CHANNEL_STATE="/etc/cubie-a5e-update/apt-channel.env"
 
 readonly ROOT_MNT="${ROOT_MNT:-$BUILD_ROOT/mnt/one-shot-root}"
 readonly DEFAULT_BOOT_MNT="${BOOT_MNT:-$BUILD_ROOT/mnt/one-shot-boot}"
@@ -1365,11 +1372,20 @@ local updater="$ROOT_MNT/usr/local/sbin/cubie-a5e-update"
 local nvme_installer="$ROOT_MNT/usr/local/sbin/cubie-a5e-install-nvme"
 local update_bundle
 local verify_dir
+local apt_package_status
+local apt_package_version
+local board_package_status
+local board_package_version
+local apt_archive_key="$ROOT_MNT$CUBIE_APT_KEY_TARGET"
+local apt_source="$ROOT_MNT$CUBIE_APT_SOURCE_TARGET"
+local apt_channel_state="$ROOT_MNT$CUBIE_APT_CHANNEL_STATE"
 
 require_nonempty_file "$apt_guard"
 require_nonempty_file "$layout"
 require_nonempty_file "$state"
 require_nonempty_file "$trusted_key"
+require_nonempty_file "$apt_archive_key"
+require_nonempty_file "$apt_channel_state"
 require_nonempty_file "$service"
 require_nonempty_file "$rsetup_wrapper"
 require_nonempty_file "$updater"
@@ -1388,8 +1404,66 @@ grep -Fxq 'Package: linux-image-* linux-dtb-*' "$apt_guard" ||
     die "Managed-kernel APT guard package list is incorrect."
 grep -Fxq 'Pin-Priority: -1' "$apt_guard" ||
     die "Managed-kernel APT guard priority is incorrect."
+
+board_package_status="$(
+    dpkg-query \
+        --admindir="$ROOT_MNT/var/lib/dpkg" \
+        -W \
+        -f='${db:Status-Abbrev}' \
+        cubie-a5e-board-support 2>/dev/null || true
+)"
+[[ "$board_package_status" == ii* ]] ||
+    die "cubie-a5e-board-support is not installed in the target image."
+
+board_package_version="$(
+    dpkg-query \
+        --admindir="$ROOT_MNT/var/lib/dpkg" \
+        -W \
+        -f='${Version}' \
+        cubie-a5e-board-support 2>/dev/null || true
+)"
+[[ "$board_package_version" == "$CUBIE_BOARD_SUPPORT_VERSION" ]] ||
+    die "APT board-support package version mismatch: $board_package_version expected=$CUBIE_BOARD_SUPPORT_VERSION"
+
+apt_package_status="$(
+    dpkg-query \
+        --admindir="$ROOT_MNT/var/lib/dpkg" \
+        -W \
+        -f='${db:Status-Abbrev}' \
+        cubie-a5e-kernel-update 2>/dev/null || true
+)"
+[[ "$apt_package_status" == ii* ]] ||
+    die "cubie-a5e-kernel-update is not installed in the target image."
+
+apt_package_version="$(
+    dpkg-query \
+        --admindir="$ROOT_MNT/var/lib/dpkg" \
+        -W \
+        -f='${Version}' \
+        cubie-a5e-kernel-update 2>/dev/null || true
+)"
+[[ "$apt_package_version" == "$UPDATE_VERSION" ]] ||
+    die "APT kernel-update package version mismatch: $apt_package_version expected=$UPDATE_VERSION"
+
+gpg --batch --no-default-keyring --keyring "$apt_archive_key" --list-keys >/dev/null 2>&1 ||
+    die "Installed Cubie A5E APT archive keyring is invalid."
+
+if [[ -n "$CUBIE_APT_REPO_URL" ]]; then
+    require_nonempty_file "$apt_source"
+    grep -Fxq "URIs: $CUBIE_APT_REPO_URL" "$apt_source" ||
+        die "Installed Cubie A5E APT source URL is incorrect."
+    grep -Fxq 'CONFIGURED=1' "$apt_channel_state" ||
+        die "Cubie A5E APT channel state does not report configured."
+else
+    [[ ! -e "$apt_source" ]] ||
+        die "Cubie A5E APT source exists even though no repository URL was configured."
+    grep -Fxq 'CONFIGURED=0' "$apt_channel_state" ||
+        die "Cubie A5E APT channel state does not report unconfigured."
+fi
 grep -Fq 'Cubie A5E signed kernel and board updates' "$rsetup_wrapper" ||
     die "rsetup wrapper lacks the Cubie A5E update menu."
+grep -Fq 'Full Debian/Radxa + approved Cubie A5E package upgrade' "$rsetup_wrapper" ||
+    die "rsetup wrapper lacks the controlled APT full-upgrade menu."
 grep -Fq -- '--self-test' "$rsetup_wrapper" ||
     die "rsetup wrapper lacks its non-interactive self-test."
 grep -Fq 'Install the current Cubie A5E system to NVMe' "$rsetup_wrapper" ||
@@ -2380,6 +2454,11 @@ printf 'initbox password expiry: disabled\n'
 printf 'Initial initbox password change required: no\n'
 printf 'Kernel update finalizer enabled: yes\n'
 printf 'APT kernel replacement guard installed: yes\n'
+printf 'APT managed Cubie board-support package installed: yes\n'
+printf 'APT managed Cubie board-support package version: %s\n' "$CUBIE_BOARD_SUPPORT_VERSION"
+printf 'APT managed Cubie kernel-update package installed: yes\n'
+printf 'APT managed Cubie kernel-update package version: %s\n' "$UPDATE_VERSION"
+printf 'Cubie A5E APT remote channel configured: %s\n' "$([[ -n "$CUBIE_APT_REPO_URL" ]] && printf yes || printf no)"
 printf 'GMAC0 expected name: eth0\n'
 printf 'GMAC1 expected name: eth1\n'
 printf 'AIC8800 expected name: wlan0\n'
@@ -2450,6 +2529,7 @@ require_command dpkg-query
 require_command dtc
 require_command fdtget
 require_command find
+require_command gpg
 require_command grep
 require_command head
 require_command lsblk
@@ -2477,6 +2557,8 @@ require_command wc
 require_nonempty_file "$KERNEL_RELEASE_FILE"
 require_nonempty_file "$UPDATE_VERSION_FILE"
 require_nonempty_file "$UPDATE_BUNDLE_FILE"
+require_nonempty_file "$APT_PACKAGE_FILE"
+require_nonempty_file "$BOARD_SUPPORT_PACKAGE_FILE"
 
 KERNEL_RELEASE="$(tr -d '[:space:]' <"$KERNEL_RELEASE_FILE")"
 UPDATE_VERSION="$(tr -d '[:space:]' <"$UPDATE_VERSION_FILE")"
