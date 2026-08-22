@@ -25,10 +25,14 @@ export STAGE_NAME="PREPARE"
 : "${KERNEL_REBUILD:=0}"
 : "${AIC_REBUILD:=0}"
 
-readonly LINUX_REPOSITORY="${LINUX_REPOSITORY:-https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git}"
-readonly LINUX_REF="${LINUX_REF:-v6.16}"
-readonly LINUX_EXPECTED_COMMIT="${LINUX_EXPECTED_COMMIT:-038d61fd642278bab63ee8ef722c50d10ab01e8f}"
-readonly UPSTREAM_SINCE="${UPSTREAM_SINCE:-2025-06-01}"
+readonly LINUX_REPOSITORY="${LINUX_REPOSITORY:-https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git}"
+readonly LINUX_REF="${LINUX_REF:-v6.18.45}"
+readonly LINUX_EXPECTED_COMMIT="${LINUX_EXPECTED_COMMIT:-bf3be28f6721e24961992ebb9e61c0cf21a56806}"
+
+KERNEL_REF_LABEL="${LINUX_REF#v}"
+[[ "$KERNEL_REF_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] ||
+    die "LINUX_REF is not safe for kernel workspace naming: $LINUX_REF"
+readonly KERNEL_REF_LABEL
 
 readonly AIC_REPOSITORY="${AIC_REPOSITORY:-https://github.com/radxa-pkg/aic8800.git}"
 readonly AIC_REF="${AIC_REF:-5.0+git20260123.5f7be68d-7}"
@@ -39,7 +43,7 @@ readonly STOCK_IMAGE_SHA512="${STOCK_IMAGE_SHA512:?STOCK_IMAGE_SHA512 is not set
 
 readonly KERNEL_CONFIG_SOURCE="${KERNEL_CONFIG_SOURCE:-}"
 
-readonly EXPECTED_KERNEL_DIR="$BUILD_ROOT/linux-6.16-one-shot"
+readonly EXPECTED_KERNEL_DIR="$BUILD_ROOT/linux-${KERNEL_REF_LABEL}-one-shot"
 readonly OLD_KERNEL_DIR="$BUILD_ROOT/linux"
 readonly EXPECTED_AIC_REPO="$BUILD_ROOT/aic8800-radxa"
 readonly EXPECTED_DOWNLOAD_DIR="$BUILD_ROOT/downloads"
@@ -326,12 +330,33 @@ validate_kernel_cache() {
     [[ -d "$KERNEL_DIR/.git" ]] || return 1
     [[ -s "$KERNEL_DIR/Makefile" ]] || return 1
     [[ -s "$KERNEL_DIR/.config" ]] || return 1
-    [[ -s "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" ]] || return 1
-    [[ -s "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" ]] || return 1
-    grep -Fxq 'dt_layout=mainline-soc-one-cell-v3' \
-        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" || return 1
-    grep -Fxq 'driver_mode=initramfs-modules-v3' \
-        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" || return 1
+    [[ -s "$KERNEL_DIR/.cubie-a5e-gmac1-dts-backport" ]] || return 1
+    grep -Fxq "baseline=$LINUX_REF" \
+        "$KERNEL_DIR/.cubie-a5e-gmac1-dts-backport" || return 1
+    grep -Fxq "baseline_commit=$LINUX_EXPECTED_COMMIT" \
+        "$KERNEL_DIR/.cubie-a5e-gmac1-dts-backport" || return 1
+    grep -Fxq 'status=complete' \
+        "$KERNEL_DIR/.cubie-a5e-gmac1-dts-backport" || return 1
+
+    [[ -s "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" ]] || return 1
+    grep -Fxq "linux_ref=$LINUX_REF" \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" || return 1
+    grep -Fxq "linux_base_commit=$LINUX_EXPECTED_COMMIT" \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" || return 1
+    grep -Fxq 'dt_layout=mainline-soc-one-cell-v4' \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" || return 1
+    grep -Fxq 'driver_mode=initramfs-modules-v4' \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" || return 1
+    grep -Fxq 'status=complete' \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" || return 1
+
+    [[ -s "$KERNEL_DIR/.cubie-a5e-a523-spi-backport" ]] || return 1
+    grep -Fxq "linux_ref=$LINUX_REF" \
+        "$KERNEL_DIR/.cubie-a5e-a523-spi-backport" || return 1
+    grep -Fxq "linux_base_commit=$LINUX_EXPECTED_COMMIT" \
+        "$KERNEL_DIR/.cubie-a5e-a523-spi-backport" || return 1
+    grep -Fxq 'status=complete' \
+        "$KERNEL_DIR/.cubie-a5e-a523-spi-backport" || return 1
     grep -Fxq 'CONFIG_AW_PCIE_RC=m' "$KERNEL_DIR/.config" || return 1
     grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$KERNEL_DIR/.config" || return 1
 
@@ -389,16 +414,36 @@ validate_legacy_kernel_tree() {
     [[ ! -d "$KERNEL_DIR/.git/rebase-merge" ]] || return 1
     [[ ! -d "$KERNEL_DIR/.git/rebase-apply" ]] || return 1
     [[ -s "$KERNEL_DIR/.config" ]] || return 1
-    [[ -s "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" ]] || return 1
-    [[ -s "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" ]] || return 1
-    grep -Fxq 'dt_layout=mainline-soc-one-cell-v3' \
-        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" || return 1
-    grep -Fxq 'driver_mode=initramfs-modules-v3' \
-        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port" || return 1
+    [[ -s "$KERNEL_DIR/.cubie-a5e-gmac1-dts-backport" ]] || return 1
+    grep -Fxq "baseline=$LINUX_REF" \
+        "$KERNEL_DIR/.cubie-a5e-gmac1-dts-backport" || return 1
+    grep -Fxq "baseline_commit=$LINUX_EXPECTED_COMMIT" \
+        "$KERNEL_DIR/.cubie-a5e-gmac1-dts-backport" || return 1
+    grep -Fxq 'status=complete' \
+        "$KERNEL_DIR/.cubie-a5e-gmac1-dts-backport" || return 1
+
+    [[ -s "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" ]] || return 1
+    grep -Fxq "linux_ref=$LINUX_REF" \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" || return 1
+    grep -Fxq "linux_base_commit=$LINUX_EXPECTED_COMMIT" \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" || return 1
+    grep -Fxq 'dt_layout=mainline-soc-one-cell-v4' \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" || return 1
+    grep -Fxq 'driver_mode=initramfs-modules-v4' \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" || return 1
+    grep -Fxq 'status=complete' \
+        "$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts" || return 1
+
+    [[ -s "$KERNEL_DIR/.cubie-a5e-a523-spi-backport" ]] || return 1
+    grep -Fxq "linux_ref=$LINUX_REF" \
+        "$KERNEL_DIR/.cubie-a5e-a523-spi-backport" || return 1
+    grep -Fxq "linux_base_commit=$LINUX_EXPECTED_COMMIT" \
+        "$KERNEL_DIR/.cubie-a5e-a523-spi-backport" || return 1
+    grep -Fxq 'status=complete' \
+        "$KERNEL_DIR/.cubie-a5e-a523-spi-backport" || return 1
+
     grep -Fxq 'CONFIG_AW_PCIE_RC=m' "$KERNEL_DIR/.config" || return 1
     grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$KERNEL_DIR/.config" || return 1
-    grep -Fxq 'status=complete' \
-        "$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports" || return 1
 
     tag_commit="$(git -C "$KERNEL_DIR" rev-parse "$LINUX_REF^{commit}" 2>/dev/null || true)"
     [[ "$tag_commit" == "$LINUX_EXPECTED_COMMIT" ]] || return 1
@@ -469,26 +514,6 @@ validate_aic_cache() {
     esac
 
     return 0
-}
-
-fetch_upstream_history() {
-    log "Fetching upstream history since $UPSTREAM_SINCE for selected backports."
-
-    if run git -C "$KERNEL_DIR" fetch \
-        --no-tags \
-        --shallow-since="$UPSTREAM_SINCE" \
-        origin \
-        master:refs/remotes/origin/master; then
-        return 0
-    fi
-
-    warn "Initial shallow upstream-history fetch failed. Repacking the shallow repository and retrying once."
-    run git -C "$KERNEL_DIR" repack -d
-    run git -C "$KERNEL_DIR" fetch \
-        --no-tags \
-        --shallow-since="$UPSTREAM_SINCE" \
-        origin \
-        master:refs/remotes/origin/master
 }
 
 prepare_kernel_source() {
@@ -568,7 +593,6 @@ prepare_kernel_source() {
     [[ "$kernel_commit" == "$LINUX_EXPECTED_COMMIT" ]] ||
         die "Kernel tag moved: expected $LINUX_EXPECTED_COMMIT, found $kernel_commit"
 
-    fetch_upstream_history
 
     kernel_status="$(git -C "$KERNEL_DIR" status --porcelain)"
 
