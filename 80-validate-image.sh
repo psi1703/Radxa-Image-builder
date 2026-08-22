@@ -48,6 +48,7 @@ readonly BASIC_PACKAGES_TARGET="/usr/share/cubie-a5e/raspios-lite-compatible-pac
 readonly INITBOX_USER="initbox"
 readonly INITBOX_SUDOERS="/etc/sudoers.d/90-initbox"
 readonly INITBOX_ACCOUNT_STATUS="/var/lib/cubie-a5e/initbox-account.status"
+readonly ADMIN_PATH_PROFILE="/etc/profile.d/cubie-a5e-admin-path.sh"
 readonly GETTY_TTY1_DROPIN="/etc/systemd/system/getty@tty1.service.d/99-initbox-login.conf"
 readonly SERIAL_GETTY_DROPIN="/etc/systemd/system/serial-getty@ttyS0.service.d/99-initbox-login.conf"
 readonly NM_WLAN_READY_FILE="/etc/NetworkManager/conf.d/20-initbox-wlan0-ready.conf"
@@ -364,9 +365,6 @@ grep -Fxq 'CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y' "$root_config" ||
 grep -Fxq 'CONFIG_CFG80211_USE_KERNEL_REGDB_KEYS=y' "$root_config" ||
     die "Installed kernel does not include the upstream regulatory signing keys."
 
-grep -Fxq 'CONFIG_REALTEK_PHY=y' "$root_config" ||
-    die "Installed kernel does not build the Realtek PHY driver in."
-
 grep -Fxq '# CONFIG_MICROSEMI_PHY is not set' "$root_config" ||
     die "Installed kernel still enables the unused Microsemi VSC85xx PHY driver."
 
@@ -559,7 +557,7 @@ for unit in \
         "$ROOT_MNT/usr/lib/systemd/system" \
         -name "$unit" \
         -print -quit 2>/dev/null |
-        grep -q .; then
+        grep . >/dev/null; then
         die "Duplicate Wi-Fi loader remains installed: $unit"
     fi
 done
@@ -857,10 +855,15 @@ local package_count=0
 local required_command
 local required_commands=(
     apt-get
+    blkid
     dtc
+    ethtool
+    iw
     jq
+    lspci
     nano
     nmcli
+    nvme
     parted
     ping
     python3
@@ -873,6 +876,7 @@ local required_commands=(
 )
 local required_file
 local required_files=(
+    "$ROOT_MNT$ADMIN_PATH_PROFILE"
     "$ROOT_MNT/usr/bin/rsetup"
     "$ROOT_MNT$RADXA_REPO_HELPER_TARGET"
     "$ROOT_MNT$RADXA_REPO_FILE"
@@ -894,6 +898,7 @@ local required_package
 local required_packages=(
     device-tree-compiler
     dialog
+    ethtool
     gdisk
     iw
     iputils-ping
@@ -903,6 +908,8 @@ local required_packages=(
     mtd-utils
     network-manager
     nano
+    nvme-cli
+    pciutils
     pkexec
     python3-yaml
     radxa-archive-keyring
@@ -911,6 +918,7 @@ local required_packages=(
     u-boot-aw2501
     u-boot-menu
     u-boot-radxa-cubie-a5e
+    util-linux
     wget
     whiptail
     wpasupplicant
@@ -956,6 +964,18 @@ for required_command in "${required_commands[@]}"; do
     target_command_exists "$required_command" ||
         die "Required target command is missing: $required_command"
 done
+
+[[ "$(stat -c '%a' "$ROOT_MNT$ADMIN_PATH_PROFILE")" == "644" ]] ||
+    die "Cubie A5E admin PATH profile must have mode 0644."
+
+grep -Fq '/usr/local/sbin' "$ROOT_MNT$ADMIN_PATH_PROFILE" ||
+    die "Cubie A5E admin PATH profile does not expose /usr/local/sbin."
+grep -Fq '/usr/sbin' "$ROOT_MNT$ADMIN_PATH_PROFILE" ||
+    die "Cubie A5E admin PATH profile does not expose /usr/sbin."
+grep -Fq '/sbin' "$ROOT_MNT$ADMIN_PATH_PROFILE" ||
+    die "Cubie A5E admin PATH profile does not expose /sbin."
+grep -Fxq 'export PATH' "$ROOT_MNT$ADMIN_PATH_PROFILE" ||
+    die "Cubie A5E admin PATH profile does not export PATH."
 
 grep -Fxq 'RSETUP_SELF_TEST=PASS' \
     "$ROOT_MNT/var/lib/cubie-a5e/rsetup-self-test.status" ||
@@ -1049,14 +1069,14 @@ if find "$ROOT_MNT/var/cache/apt/archives" \
     -type f \
     -name '*.deb' \
     -print -quit |
-    grep -q .; then
+    grep . >/dev/null; then
     die "Target image still contains cached APT package archives."
 fi
 
 if find "$ROOT_MNT/var/lib/apt/lists" \
     -mindepth 1 \
     -print -quit |
-    grep -q .; then
+    grep . >/dev/null; then
     die "Target image still contains disposable APT package indexes."
 fi
 
@@ -1176,7 +1196,7 @@ sudo_members="$(
 )"
 
 tr ',' '\n' <<<"$sudo_members" |
-    grep -Fxq "$INITBOX_USER" ||
+    grep -Fx "$INITBOX_USER" >/dev/null ||
     die "The initbox account is not a member of the sudo group."
 
 [[ "$(stat -c '%a' "$ROOT_MNT$INITBOX_SUDOERS")" == "440" ]] ||
@@ -1285,7 +1305,7 @@ if find "$ROOT_MNT/boot" \
     -type d \
     \( -name dtb -o -name 'dtb-*' \) \
     -print -quit |
-    grep -q .; then
+    grep . >/dev/null; then
     die "Stale DTB directory remains under the rootfs /boot."
 fi
 
@@ -1353,7 +1373,7 @@ if find "$ROOT_MNT" "$BOOT_MNT" \
     -xdev \
     \( -name '*5.15.147-20-aw2501*' -o -name 'extlinux.conf.before-*' \) \
     -print -quit |
-    grep -q .; then
+    grep . >/dev/null; then
     die "Linux 5.15 kernel or recovery artifacts remain installed."
 fi
 }
@@ -1401,11 +1421,19 @@ grep -Fq 'Install the current Cubie A5E system to NVMe' "$rsetup_wrapper" ||
     die "rsetup wrapper lacks the Cubie A5E NVMe installation menu."
 grep -Fq '"$CUBIE_NVME_INSTALL" --tui' "$rsetup_wrapper" ||
     die "rsetup wrapper does not invoke the managed NVMe installer."
+grep -Fxq 'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' "$rsetup_wrapper" ||
+    die "rsetup wrapper does not establish the deterministic administrative PATH before self-test handling."
 
 bash -n "$nvme_installer" ||
     die "Installed Cubie A5E NVMe installer failed bash syntax validation."
 grep -Fq 'self-test: PASS' "$nvme_installer" ||
     die "NVMe installer lacks its non-destructive self-test marker."
+grep -Fxq 'readonly ADMIN_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' "$nvme_installer" ||
+    die "NVMe installer does not define the deterministic administrative PATH."
+grep -Fxq 'PATH="$ADMIN_PATH"' "$nvme_installer" ||
+    die "NVMe installer does not activate the deterministic administrative PATH."
+grep -Fxq 'export PATH' "$nvme_installer" ||
+    die "NVMe installer does not export the deterministic administrative PATH."
 grep -Fq 'Expected the running Cubie A5E root filesystem on partition 3' "$nvme_installer" ||
     die "NVMe installer lacks the managed partition-3 source guard."
 grep -Fq 'Expected partition 3 to be the final source partition' "$nvme_installer" ||
@@ -2058,7 +2086,7 @@ pio_pg_supply="$(
 fdtget -p \
     "$target_dtb" \
     /soc/i2c@7081400/pmic@34/regulators/bldo1 |
-    grep -Fxq 'regulator-always-on' ||
+    grep -Fx 'regulator-always-on' >/dev/null ||
     die "Installed DTB does not keep BLDO1 enabled."
 
 wifi_interrupt_parent="$(
@@ -2242,9 +2270,6 @@ grep -Fxq 'CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y' "$KERNEL_CONFIG" ||
 
 grep -Fxq 'CONFIG_CFG80211_USE_KERNEL_REGDB_KEYS=y' "$KERNEL_CONFIG" ||
     die "CONFIG_CFG80211_USE_KERNEL_REGDB_KEYS is not enabled."
-
-grep -Fxq 'CONFIG_REALTEK_PHY=y' "$KERNEL_CONFIG" ||
-    die "CONFIG_REALTEK_PHY is not built in."
 
 grep -Fxq '# CONFIG_MICROSEMI_PHY is not set' "$KERNEL_CONFIG" ||
     die "CONFIG_MICROSEMI_PHY must remain disabled for the Cubie A5E."
@@ -2439,6 +2464,11 @@ printf 'Minimum compact-image free-space headroom bytes: %s\n' \
     "$MINIMUM_ROOT_AVAILABLE_BYTES"
 printf 'ping command installed: yes\n'
 printf 'nano editor installed: yes\n'
+printf 'Field diagnostic commands installed: blkid ethtool iw lspci nvme rfkill\n'
+printf 'Field diagnostic packages installed: ethtool iw rfkill util-linux pciutils nvme-cli\n'
+printf 'initbox administrative PATH profile installed: yes\n'
+printf 'rsetup deterministic administrative PATH validated: yes\n'
+printf 'NVMe installer deterministic administrative PATH validated: yes\n'
 printf 'Default interactive user: initbox\n'
 printf 'initbox passwordless sudo: yes\n'
 printf 'Automatic root login: disabled\n'
@@ -2496,7 +2526,7 @@ printf 'systemd PID1 executable validated: yes\n'
 printf 'NVMe rsync mountpoint preservation validated: yes\n'
 printf 'NVMe on-board SPI preflight validated: yes\n'
 printf 'SPI and MTD/SPI-NOR drivers built in: yes\n'
-printf 'Realtek Ethernet PHY driver enabled: yes\n'
+printf 'Ethernet PHY policy: Maxio MAE0621A uses generic PHY on Linux 6.18.45\n'
 printf 'Unused Microsemi VSC85xx PHY driver disabled: yes\n'
 printf 'zstd initramfs compressor available: yes\n'
 printf 'Read-only remount validation: yes\n'
@@ -2562,7 +2592,7 @@ esac
 [[ "$UPDATE_VERSION" =~ ^[A-Za-z0-9._+:-]+$ ]] ||
     die "Update version is invalid: $UPDATE_VERSION"
 
-log "Stage 80 revision: linux-6.18-lts-validation-v1-20260822"
+log "Stage 80 revision: linux-6.18-lts-field-runtime-v2-20260822"
 log "Beginning clean read-only target validation."
 
 load_target_layout
