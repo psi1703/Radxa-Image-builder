@@ -152,7 +152,7 @@ stages+=(
 if [[ "$BUILD_MODE" == "image" ]]; then
     stages+=(
         "50-write-base-image.sh"
-        "60-install-linux-6.16.sh"
+        "60-install-managed-kernel.sh"
         "70-install-network-policy.sh"
         "80-validate-image.sh"
     )
