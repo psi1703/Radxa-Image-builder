@@ -15,6 +15,10 @@ export STAGE_NAME="BUNDLE"
 : "${KERNEL_DIR:?KERNEL_DIR is not set}"
 : "${AIC_REPO:?AIC_REPO is not set}"
 : "${CROSS_COMPILE:?CROSS_COMPILE is not set}"
+: "${LINUX_REF:?LINUX_REF is not set}"
+: "${LINUX_EXPECTED_COMMIT:?LINUX_EXPECTED_COMMIT is not set}"
+: "${AIC_REF:?AIC_REF is not set}"
+: "${AIC_EXPECTED_COMMIT:?AIC_EXPECTED_COMMIT is not set}"
 
 readonly KERNEL_RELEASE_FILE="$BUILD_ROOT/.one-shot-kernel-release"
 readonly AIC_MODULE_LIST="$BUILD_ROOT/.one-shot-aic-modules"
@@ -85,10 +89,14 @@ compute_bundle_fingerprint() {
     local safe_version
 
     BUNDLE_INPUT_FINGERPRINT="$({
-        printf 'cache-format=1\n'
+        printf 'cache-format=2\n'
         printf 'update-version=%s\n' "$UPDATE_VERSION"
         printf 'kernel-release=%s\n' "$KERNEL_RELEASE"
-        printf 'kernel-commit=%s\n' "$(git -C "$KERNEL_DIR" rev-parse HEAD)"
+        printf 'linux-ref=%s\n' "$LINUX_REF"
+        printf 'linux-expected-commit=%s\n' "$LINUX_EXPECTED_COMMIT"
+        printf 'aic-ref=%s\n' "$AIC_REF"
+        printf 'aic-expected-commit=%s\n' "$AIC_EXPECTED_COMMIT"
+        printf 'kernel-tree-commit=%s\n' "$(git -C "$KERNEL_DIR" rev-parse HEAD)"
         printf 'aic-commit=%s\n' "$(git -C "$AIC_REPO" rev-parse HEAD)"
         printf 'public-key-fingerprint=%s\n' "$(public_key_fingerprint)"
         printf 'stage-script-sha256=%s\n' \
@@ -123,7 +131,7 @@ validated_bundle_cache_available() {
     local cached_bundle_hash
 
     [[ -s "$BUNDLE_CACHE_STATE" ]] || return 1
-    [[ "$(cache_value cache_format)" == "1" ]] || return 1
+    [[ "$(cache_value cache_format)" == "2" ]] || return 1
     [[ "$(cache_value fingerprint)" == "$BUNDLE_INPUT_FINGERPRINT" ]] || return 1
     [[ "$(cache_value bundle_path)" == "$BUNDLE_PATH" ]] || return 1
     [[ "$(cache_value public_key_fingerprint)" == "$(public_key_fingerprint)" ]] || return 1
@@ -134,11 +142,19 @@ validated_bundle_cache_available() {
     actual_bundle_hash="$(sha256sum -- "$BUNDLE_PATH" | awk '{print $1}')"
     [[ "$actual_bundle_hash" == "$cached_bundle_hash" ]] || return 1
 
+    local manifest_content
+
     tar -tzf "$BUNDLE_PATH" >/dev/null 2>&1 || return 1
-    tar -xOf "$BUNDLE_PATH" manifest.env 2>/dev/null |
-        grep -Fxq "UPDATE_VERSION=$UPDATE_VERSION" || return 1
-    tar -xOf "$BUNDLE_PATH" manifest.env 2>/dev/null |
-        grep -Fxq "KERNEL_RELEASE=$KERNEL_RELEASE" || return 1
+    manifest_content="$(tar -xOf "$BUNDLE_PATH" manifest.env 2>/dev/null)" || return 1
+
+    grep -Fx -- "UPDATE_VERSION=$UPDATE_VERSION" <<<"$manifest_content" >/dev/null || return 1
+    grep -Fx -- "KERNEL_RELEASE=$KERNEL_RELEASE" <<<"$manifest_content" >/dev/null || return 1
+    grep -Fx -- "KERNEL_BASE_REF=$LINUX_REF" <<<"$manifest_content" >/dev/null || return 1
+    grep -Fx -- "KERNEL_BASE_COMMIT=$LINUX_EXPECTED_COMMIT" <<<"$manifest_content" >/dev/null || return 1
+    grep -Fx -- "KERNEL_TREE_COMMIT=$(git -C "$KERNEL_DIR" rev-parse HEAD)" <<<"$manifest_content" >/dev/null || return 1
+    grep -Fx -- "AIC_SOURCE_REF=$AIC_REF" <<<"$manifest_content" >/dev/null || return 1
+    grep -Fx -- "AIC_SOURCE_COMMIT=$AIC_EXPECTED_COMMIT" <<<"$manifest_content" >/dev/null || return 1
+
     openssl dgst \
         -sha256 \
         -verify "$PUBLIC_KEY" \
@@ -156,7 +172,7 @@ write_bundle_cache_state() {
     temporary_state="$(mktemp "$CACHE_DIR/.update-bundle.XXXXXX")"
 
     {
-        printf 'cache_format=1\n'
+        printf 'cache_format=2\n'
         printf 'fingerprint=%s\n' "$BUNDLE_INPUT_FINGERPRINT"
         printf 'bundle_path=%s\n' "$BUNDLE_PATH"
         printf 'bundle_sha256=%s\n' "$(sha256sum -- "$BUNDLE_PATH" | awk '{print $1}')"
@@ -200,18 +216,44 @@ validate_inputs() {
     [[ "$KERNEL_RELEASE" =~ ^[A-Za-z0-9._+-]+$ ]] ||
         die "Invalid kernel release: $KERNEL_RELEASE"
 
+    [[ "$LINUX_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+        die "LINUX_REF must pin an exact point release, got: $LINUX_REF"
+    [[ "$LINUX_EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+        die "LINUX_EXPECTED_COMMIT is not a full 40-character Git commit."
+    [[ "$AIC_EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+        die "AIC_EXPECTED_COMMIT is not a full 40-character Git commit."
+
+    git -C "$KERNEL_DIR" rev-parse "$LINUX_EXPECTED_COMMIT^{commit}" >/dev/null 2>&1 ||
+        die "Pinned kernel base commit is unavailable: $LINUX_EXPECTED_COMMIT"
+    git -C "$KERNEL_DIR" merge-base --is-ancestor "$LINUX_EXPECTED_COMMIT" HEAD ||
+        die "Kernel tree is not based on pinned source commit $LINUX_EXPECTED_COMMIT."
+    [[ "$(git -C "$AIC_REPO" rev-parse HEAD)" == "$AIC_EXPECTED_COMMIT" ]] ||
+        die "AIC8800 source no longer matches pinned commit $AIC_EXPECTED_COMMIT."
+
+    case "$KERNEL_RELEASE" in
+        "${LINUX_REF#v}" | "${LINUX_REF#v}"+*) ;;
+        *)
+            die "Kernel release $KERNEL_RELEASE does not belong to pinned source $LINUX_REF."
+            ;;
+    esac
+
     while IFS= read -r module; do
         [[ -n "$module" ]] || continue
+        local module_vermagic
+
         require_nonempty_file "$module"
+        module_vermagic="$(modinfo -F vermagic "$module" | awk '{print $1}')"
+        [[ "$module_vermagic" == "$KERNEL_RELEASE" ]] ||
+            die "AIC module $(basename -- "$module") vermagic $module_vermagic does not match $KERNEL_RELEASE."
         module_count=$((module_count + 1))
     done <"$AIC_MODULE_LIST"
 
     ((module_count == 2)) ||
         die "AIC module manifest must contain exactly two modules."
 
-    grep -q '/aic8800_bsp\.ko$' "$AIC_MODULE_LIST" ||
+    grep -E '/aic8800_bsp\.ko$' "$AIC_MODULE_LIST" >/dev/null ||
         die "AIC module manifest lacks aic8800_bsp.ko"
-    grep -q '/aic8800_fdrv\.ko$' "$AIC_MODULE_LIST" ||
+    grep -E '/aic8800_fdrv\.ko$' "$AIC_MODULE_LIST" >/dev/null ||
         die "AIC module manifest lacks aic8800_fdrv.ko"
 }
 
@@ -314,10 +356,11 @@ write_manifest() {
         printf 'UPDATE_VERSION=%s\n' "$UPDATE_VERSION"
         printf 'KERNEL_RELEASE=%s\n' "$KERNEL_RELEASE"
         printf 'MIN_UPDATER_VERSION=1\n'
-        printf 'KERNEL_SOURCE_COMMIT=%s\n' \
-            "$(git -C "$KERNEL_DIR" rev-parse HEAD)"
-        printf 'AIC_SOURCE_COMMIT=%s\n' \
-            "$(git -C "$AIC_REPO" rev-parse HEAD)"
+        printf 'KERNEL_BASE_REF=%s\n' "$LINUX_REF"
+        printf 'KERNEL_BASE_COMMIT=%s\n' "$LINUX_EXPECTED_COMMIT"
+        printf 'KERNEL_TREE_COMMIT=%s\n' "$(git -C "$KERNEL_DIR" rev-parse HEAD)"
+        printf 'AIC_SOURCE_REF=%s\n' "$AIC_REF"
+        printf 'AIC_SOURCE_COMMIT=%s\n' "$AIC_EXPECTED_COMMIT"
     } >"$WORK_DIR/manifest.env"
 }
 
@@ -381,6 +424,11 @@ write_report() {
         printf 'Status: PASS\n'
         printf 'Update version: %s\n' "$UPDATE_VERSION"
         printf 'Kernel release: %s\n' "$KERNEL_RELEASE"
+        printf 'Kernel source ref: %s\n' "$LINUX_REF"
+        printf 'Kernel base commit: %s\n' "$LINUX_EXPECTED_COMMIT"
+        printf 'Kernel patched tree commit: %s\n' "$(git -C "$KERNEL_DIR" rev-parse HEAD)"
+        printf 'AIC source ref: %s\n' "$AIC_REF"
+        printf 'AIC source commit: %s\n' "$AIC_EXPECTED_COMMIT"
         printf 'Bundle input fingerprint: %s\n' "$BUNDLE_INPUT_FINGERPRINT"
         printf 'Validated bundle cache reused: %s\n' "$BUNDLE_CACHE_REUSED"
         printf 'Bundle: %s\n' "$BUNDLE_PATH"
@@ -407,6 +455,7 @@ main() {
         install \
         make \
         mktemp \
+        modinfo \
         mv \
         openssl \
         rsync \
