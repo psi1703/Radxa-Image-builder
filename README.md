@@ -8,7 +8,7 @@ The builder supports two image output paths:
 - Write directly to a removable SD card or SSD.
 - Create a complete compressed `.img.xz` disk image for Balena Etcher.
 
-It can also build a signed kernel/vendor update bundle without writing a target device.
+It can also build the signed kernel/vendor update bundle together with APT-managed `cubie-a5e-board-support` and `cubie-a5e-kernel-update` packages, without writing a target device.
 
 ## Validated board result
 
@@ -35,7 +35,7 @@ The generated image creates the local account `initbox` with password `init`. Th
 â””â”€â”€ build/                          # downloads, sources, build state, logs and keys
 ```
 
-Downloaded sources, rootfs files, build objects, logs, update bundles and signing keys stay under the ignored `build/` directory. In Etcher-image mode, the temporary raw image, final compressed image and checksum are created directly under `/home/psi/`; the temporary raw image is removed after successful compression. No file from the old `/home/psi/cubie-a5e-build` layout is required.
+Downloaded sources, rootfs files, build objects, logs, update bundles, generated APT repositories and signing keys stay under the ignored `build/` directory. In Etcher-image mode, the temporary raw image, final compressed image and checksum are created directly under `/home/psi/`; the temporary raw image is removed after successful compression. No file from the old `/home/psi/cubie-a5e-build` layout is required.
 
 ## Prepare a fresh clone
 
@@ -86,6 +86,16 @@ sudo env OUTPUT_MODE=etcher-image AIC_REBUILD=1 ./build-cubie-a5e.sh
 ```
 
 Successful cache metadata is stored under `build/cache/`. Missing, stale, inconsistent or hash-mismatched cache state is never trusted; the affected component is rebuilt and the cache is recorded again only after all existing validation gates pass.
+
+## Interactive build menu
+
+For normal build-host use, launch the menu front end:
+
+```bash
+sudo ./cubie-build-menu.sh
+```
+
+The menu does not duplicate build logic. It maps the selected operation to the existing `build-cubie-a5e.sh` modes and environment variables, including complete Etcher images, direct-device builds, signed APT update-repository builds, forced kernel/AIC rebuilds, source-pin display and repository validation.
 
 ## Write directly to an SD card or SSD
 
@@ -158,11 +168,20 @@ The builder normally reuses a completed rootfs. To deliberately replace an incom
 sudo env OUTPUT_MODE=device TARGET_DEVICE=/dev/sdX ROOTFS_REBUILD=1 ./build-cubie-a5e.sh
 ```
 
-## Build only a signed update bundle
+## Build signed kernel/board APT updates only
 
 ```bash
 sudo env BUILD_MODE=update-bundle ./build-cubie-a5e.sh
 ```
+
+This mode builds the signed kernel/vendor bundle and then Stage 46 wraps the managed runtime and bundle into two Debian packages:
+
+- `cubie-a5e-board-support` owns the updater, `rsetup` wrapper, guarded NVMe installer, update trust material and APT-channel policy. Bump `CUBIE_BOARD_SUPPORT_VERSION` when those runtime assets need to be delivered to installed boards.
+- `cubie-a5e-kernel-update` carries the signed kernel/vendor bundle and delegates activation to `cubie-a5e-update`, preserving the existing pending-boot, rollback and successful-boot finalization flow.
+
+Stage 46 also creates and signs a flat APT repository under `build/apt-repository/`. The archive signing key is persistent under ignored `build/apt-signing/`. Keep both the APT private key and the existing bundle-signing private key private and backed up.
+
+`CUBIE_APT_REPO_URL` is intentionally empty by default. Once the generated repository is published at a stable HTTPS endpoint, set that URL in the build environment or `config/source-pins.env`; new board-support packages will install the signed deb822 source. `rsetup` then exposes **Full Debian/Radxa + approved Cubie A5E package upgrade**, which runs `apt-get update` followed by `apt-get full-upgrade`. Generic Debian kernel replacement remains blocked by the managed-kernel APT policy, and SPI firmware is never flashed automatically.
 
 The first bundle build creates the private signing key at:
 
@@ -192,6 +211,8 @@ Stage 20 names and verifies all nine required upstream Linux backport commit IDs
 | Validated build-cache metadata | `build/cache/` |
 | Debian rootfs | `build/rootfs/` |
 | Signed update bundles | `build/update-bundles/` |
+| Cubie A5E Debian packages and signed flat APT repository | `build/apt-repository/` |
+| APT archive signing identity | `build/apt-signing/` |
 | Flashable image and checksum | `/home/psi/cubie-a5e-debian13-linux6.16-<build-id>.img.xz{,.sha256}` |
 | Private signing identity | `build/update-signing/` |
 
