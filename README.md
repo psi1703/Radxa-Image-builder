@@ -18,7 +18,7 @@ It can also build the signed kernel/vendor update bundle together with APT-manag
 | GMAC1 / GMAC200 | `eth1` | Managed by NetworkManager |
 | AIC8800 SDIO | `wlan0` | Managed, disconnected, with no saved Wi-Fi profile |
 
-The generated image creates the local account `initbox` with password `init`. The account has passwordless `sudo`, no forced password change, and no password expiry. Automatic root login is disabled. Stage 80 rejects an image that does not match this policy.
+The generated image creates the local account `initbox` with password `*****`. The account has passwordless `sudo`, no forced password change, and no password expiry. Automatic root login is disabled. Stage 80 rejects an image that does not match this policy.
 
 ## Repository layout
 
