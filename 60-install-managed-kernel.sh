@@ -1375,7 +1375,12 @@ run_arm64_chroot '
 
     if ((${#kernel_packages[@]} > 0)); then
         export DEBIAN_FRONTEND=noninteractive
-        apt-get purge -y -- "${kernel_packages[@]}"
+        export APT_LISTCHANGES_FRONTEND=none
+        export UCF_FORCE_CONFFOLD=1
+        apt-get \
+            -o Dpkg::Options::=--force-confdef \
+            -o Dpkg::Options::=--force-confold \
+            purge -y -- "${kernel_packages[@]}"
     fi
 '
 }
@@ -1477,6 +1482,15 @@ run_arm64_chroot "$RADXA_REPO_HELPER_TARGET"
 # shellcheck disable=SC2016
 run_arm64_chroot '
     export DEBIAN_FRONTEND=noninteractive
+    export APT_LISTCHANGES_FRONTEND=none
+    export UCF_FORCE_CONFFOLD=1
+
+    apt_get_noninteractive() {
+        apt-get \
+            -o Dpkg::Options::=--force-confdef \
+            -o Dpkg::Options::=--force-confold \
+            "$@"
+    }
 
     mapfile -t basic_packages < <(
         sed -E \
@@ -1490,7 +1504,7 @@ run_arm64_chroot '
         exit 1
     }
 
-    apt-get update
+    apt_get_noninteractive update
 
     for package in "${basic_packages[@]}"; do
         apt-cache show "$package" >/dev/null 2>&1 || {
@@ -1499,7 +1513,7 @@ run_arm64_chroot '
         }
     done
 
-    apt-get install -y --no-install-recommends "${basic_packages[@]}"
+    apt_get_noninteractive install -y --no-install-recommends "${basic_packages[@]}"
 
     rsetup_packages=(
         device-tree-compiler
@@ -1541,15 +1555,15 @@ run_arm64_chroot '
         }
     done
 
-    apt-get install -y --no-install-recommends \
+    apt_get_noninteractive install -y --no-install-recommends \
         "${rsetup_packages[@]}" \
         "${root_resize_packages[@]}"
 
-    apt-get install -y --reinstall --no-install-recommends \
+    apt_get_noninteractive install -y --reinstall --no-install-recommends \
         librtui \
         rsetup
 
-    apt-get install -y --reinstall --no-install-recommends \
+    apt_get_noninteractive install -y --reinstall --no-install-recommends \
         wireless-regdb
 
     update-alternatives --set \
@@ -2251,8 +2265,19 @@ log "Installing initramfs-tools in the target root filesystem."
 
 prepare_chroot_resolver
 
-run_arm64_chroot \
-    'export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y --no-install-recommends initramfs-tools'
+run_arm64_chroot '
+    export DEBIAN_FRONTEND=noninteractive
+    export APT_LISTCHANGES_FRONTEND=none
+    export UCF_FORCE_CONFFOLD=1
+    apt-get \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold \
+        update
+    apt-get \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold \
+        install -y --no-install-recommends initramfs-tools
+'
 
 restore_chroot_resolver
 
