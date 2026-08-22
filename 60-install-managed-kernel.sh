@@ -2109,7 +2109,7 @@ require_nonempty_file "$ROOT_MNT$ADMIN_PATH_PROFILE"
 run_arm64_chroot "
     login_path=\"\$(su - '$INITBOX_USER' -c 'printf %s \"\$PATH\"')\"
 
-    case ":\$login_path:" in
+    case \":\$login_path:\" in
         *:/usr/sbin:*) ;;
         *)
             printf '%s\n' 'initbox login PATH does not include /usr/sbin.' >&2
