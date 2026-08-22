@@ -33,7 +33,6 @@ Radxa-Image-builder/
 |-- docs/                           # build-flow and validated-hardware documentation
 |-- lib/common.sh                   # shared shell helpers used by build stages
 |-- tools/                          # repository validation and maintenance utilities
-|-- MANIFEST.sha256                 # checksums for tracked repository files
 `-- build/                          # ignored downloads, sources, caches, logs, bundles and keys
 ```
 
@@ -299,9 +298,7 @@ Or use:
 ./build-cubie-a5e.sh --validate
 ```
 
-The checker runs Bash parsing, ShellCheck when installed, manifest verification, executable-mode checks, large-file checks, private-key/path-leak checks, build-policy checks, and regression guards for safety-critical behavior such as the NVMe SPI/GPT validation. Stage 80 remains the authoritative validation of the written image.
-
-`MANIFEST.sha256` is updated only after all planned repository corrections are complete. During a staged correction pass, the validator can therefore report expected checksum mismatches for files changed since the last manifest update.
+The checker runs Bash parsing, ShellCheck when installed, executable-mode checks, large-file checks, private-key/path-leak checks, build-policy checks, and regression guards for safety-critical behavior such as the NVMe SPI/GPT validation. Stage 80 remains the authoritative validation of the written image.
 
 ## Tested hardware state
 
