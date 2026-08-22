@@ -10,8 +10,9 @@
 | 30 | Reuse hash-validated kernel outputs or build Linux, DTBs, and in-tree modules, then record successful cache state | Kernel tree, release marker, and kernel cache metadata |
 | 40 | Reuse hash-validated AIC8800 outputs or build and validate the SDIO modules, then record successful cache state | AIC8800 tree, module manifest, and AIC8800 cache metadata |
 | 45 | Reuse an exact validated bundle or create and sign the managed kernel/vendor update bundle | `build/update-bundles/`, bundle cache metadata, and local signing identity |
+| 46 | Build `cubie-a5e-board-support` and `cubie-a5e-kernel-update` Debian packages, generate the flat APT index, and sign its Release metadata | `build/apt-repository/` and persistent `build/apt-signing/` identity |
 | 50 | Write the Radxa donor disk layout, replace partition 3 with Debian 13, and expand it to the selected target or image size | Physical target or image-backed loop device |
-| 60 | Install the kernel, DTB, firmware, packages, login policy, updater, `rsetup`, guarded SD-to-NVMe migration helper, and first-boot root-filesystem expansion service | Physical target or image-backed loop device |
+| 60 | Install the kernel, DTB, firmware, packages, login policy, updater, `rsetup`, guarded SD-to-NVMe migration helper, APT-managed board/kernel packages, and first-boot root-filesystem expansion service | Physical target or image-backed loop device |
 | 70 | Install the deterministic interface and NetworkManager policy | Physical target or image-backed loop device |
 | 80 | Perform clean, read-only target validation, including the NVMe migration integration, expansion service, and free-space checks | Validation report and evidence |
 
@@ -33,7 +34,7 @@ Stage 30 repeats the kernel cache checks before using compiled output. A cache h
 
 The AIC8800 fingerprint depends on the kernel fingerprint, declared AIC8800 source pin, cross-compiler and Stage 40. Stages 10 and 40 verify the pinned AIC8800 commit, kernel release, module hashes, BSP symbol/version data, compiler flags, vermagic and imported-symbol policy before reuse. `AIC_REBUILD=1` forces only the external module rebuild; `KERNEL_REBUILD=1` forces both kernel and AIC8800 rebuilds.
 
-Stage 45 fingerprints the exact kernel Image, configuration, DTB, AIC8800 modules, firmware, source commits, stage implementation and persistent signing public key. An existing signed bundle is reused only when that fingerprint, bundle hash, archive structure and manifest version/release all match. Cache metadata remains under ignored `build/cache/`; incomplete or failed builds never publish new successful cache state.
+Stage 45 fingerprints the exact kernel Image, configuration, DTB, AIC8800 modules, firmware, source commits, stage implementation and persistent bundle-signing public key. An existing signed bundle is reused only when that fingerprint, bundle hash, archive structure and manifest version/release all match. Stage 46 packages that signed bundle without weakening its validation: `cubie-a5e-kernel-update` invokes the existing updater from its package post-install step, while `cubie-a5e-board-support` owns the updater/runtime and APT trust configuration. The flat APT repository has a separate persistent GPG archive-signing identity. Cache metadata remains under ignored `build/cache/`; incomplete or failed builds never publish new successful cache state.
 
 ## Build modes
 
@@ -45,6 +46,8 @@ When an Etcher image is flashed to a larger SD card or SSD, the enabled `cubie-a
 
 The installed `rsetup` wrapper also exposes a guarded **Install the current Cubie A5E system to NVMe** operation. `assets/cubie-a5e-install-nvme` treats the repository's partition-3 root/boot layout as a hard contract: it identifies the live source from `/`, verifies partition 3 is final and the running managed kernel/initramfs/DTB/extlinux/fstab/PCIe-initramfs state is coherent with no pending update, accepts only a whole writable NVMe namespace, rejects mounted/swap targets and undersized devices, preserves the Radxa pre-root boot-chain area, recreates partition 3 to the NVMe capacity with a fresh ext4 UUID, performs a metadata-preserving two-pass filesystem copy, rewrites the managed UUID consumers, and verifies GPT/ext4/kernel/initramfs/DTB/update-layout state before success. Standalone NVMe boot still depends on compatible Cubie A5E SPI boot firmware.
 
-With `BUILD_MODE=update-bundle`, the wrapper runs Stages 10 and 20 through 45. It builds and signs the kernel/vendor update bundle without running the target-writing Stages 50 through 80.
+With `BUILD_MODE=update-bundle`, the wrapper runs Stages 10 and 20 through 46. It builds and signs the kernel/vendor update bundle, produces the board-support and kernel-update Debian packages, and regenerates the signed flat APT repository without running the target-writing Stages 50 through 80.
 
-The persistent private update-signing key stays under ignored `build/update-signing/`. It is never installed into the generated image and must never be committed to Git.
+On an installed board, a configured Cubie update channel can therefore be consumed by normal `apt-get full-upgrade` or by the rsetup full-system-upgrade menu. The kernel package still delegates activation to `cubie-a5e-update`, so a new kernel remains pending until a successful reboot finalizes it. SPI bootloader flashing and NVMe migration remain explicit rsetup operations and are never triggered by package upgrade.
+
+The persistent private bundle-signing key stays under ignored `build/update-signing/`, and the persistent APT archive-signing identity stays under ignored `build/apt-signing/`. Neither private key is installed into the generated image and neither may be committed to Git.
