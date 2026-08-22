@@ -10,6 +10,7 @@ readonly SCRIPT_DIR
 source "$SCRIPT_DIR/lib/common.sh"
 
 export STAGE_NAME="PCIE"
+# Stage 22 revision: linux-6.18-lts-vendor-pcie-port-v1-20260822
 
 : "${BUILD_ROOT:?BUILD_ROOT is not set}"
 : "${KERNEL_DIR:?KERNEL_DIR is not set}"
@@ -18,15 +19,20 @@ export STAGE_NAME="PCIE"
 : "${BSP_REPOSITORY:?BSP_REPOSITORY is not set}"
 : "${BSP_REF:?BSP_REF is not set}"
 : "${BSP_EXPECTED_COMMIT:?BSP_EXPECTED_COMMIT is not set}"
+: "${LINUX_REF:?LINUX_REF is not set}"
+: "${LINUX_EXPECTED_COMMIT:?LINUX_EXPECTED_COMMIT is not set}"
 
-readonly EXPECTED_KERNEL_DIR="$BUILD_ROOT/linux-6.16-one-shot"
-readonly GMAC1_STAMP="$KERNEL_DIR/.cubie-a5e-gmac1-upstream-backports"
-readonly PCIE_STAMP="$KERNEL_DIR/.cubie-a5e-pcie-vendor-port"
+KERNEL_VERSION_COMPONENT="${LINUX_REF#v}"
+[[ "$KERNEL_VERSION_COMPONENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "Unsupported LINUX_REF for Stage 22: $LINUX_REF"
+readonly KERNEL_VERSION_COMPONENT
+readonly EXPECTED_KERNEL_DIR="$BUILD_ROOT/linux-${KERNEL_VERSION_COMPONENT}-one-shot"
+readonly GMAC1_STAMP="$KERNEL_DIR/.cubie-a5e-gmac1-dts-backport"
+readonly PCIE_STAMP="$KERNEL_DIR/.cubie-a5e-pcie-vendor-port-lts"
 readonly SOC_DTSI="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a523.dtsi"
 readonly BOARD_DTS="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dts"
 readonly BOARD_DTB="$KERNEL_DIR/arch/arm64/boot/dts/allwinner/sun55i-a527-cubie-a5e.dtb"
 readonly CCU_DRIVER="$KERNEL_DIR/drivers/clk/sunxi-ng/ccu-sun55i-a523.c"
-readonly CCU_HEADER="$KERNEL_DIR/drivers/clk/sunxi-ng/ccu-sun55i-a523.h"
 readonly CLOCK_BINDING="$KERNEL_DIR/include/dt-bindings/clock/sun55i-a523-ccu.h"
 readonly POWER_BINDING="$KERNEL_DIR/include/dt-bindings/power/allwinner,sun55i-a523-pck-600.h"
 readonly PCIE_DIR="$KERNEL_DIR/drivers/pci/controller/sunxi"
@@ -57,8 +63,10 @@ require_nonempty_file() {
 completed_port_available() {
     [[ -s "$PCIE_STAMP" ]] || return 1
     grep -Fxq "bsp_commit=$BSP_EXPECTED_COMMIT" "$PCIE_STAMP" || return 1
-    grep -Fxq 'dt_layout=mainline-soc-one-cell-v3' "$PCIE_STAMP" || return 1
-    grep -Fxq 'driver_mode=initramfs-modules-v3' "$PCIE_STAMP" || return 1
+    grep -Fxq "linux_ref=$LINUX_REF" "$PCIE_STAMP" || return 1
+    grep -Fxq "linux_base_commit=$LINUX_EXPECTED_COMMIT" "$PCIE_STAMP" || return 1
+    grep -Fxq 'dt_layout=mainline-soc-one-cell-v4' "$PCIE_STAMP" || return 1
+    grep -Fxq 'driver_mode=initramfs-modules-v4' "$PCIE_STAMP" || return 1
     grep -Fxq 'status=complete' "$PCIE_STAMP" || return 1
     [[ -s "$BOARD_DTB" ]] || return 1
     [[ -s "$KERNEL_DIR/.config" ]] || return 1
@@ -67,6 +75,24 @@ completed_port_available() {
     grep -Fxq 'CONFIG_BLK_DEV_NVME=y' "$KERNEL_DIR/.config" || return 1
 
     return 0
+}
+
+validate_kernel_baseline() {
+    local base_commit
+
+    need_dir "$KERNEL_DIR/.git"
+    require_nonempty_file "$KERNEL_DIR/Makefile"
+
+    [[ "$LINUX_REF" == v6.18.* ]] ||
+        die "Stage 22 has only been reviewed for Linux 6.18.y LTS; found $LINUX_REF"
+
+    base_commit="$(git -C "$KERNEL_DIR" rev-parse "$LINUX_EXPECTED_COMMIT^{commit}")" ||
+        die "Pinned Linux base commit is unavailable: $LINUX_EXPECTED_COMMIT"
+    [[ "$base_commit" == "$LINUX_EXPECTED_COMMIT" ]] ||
+        die "Pinned Linux base commit mismatch: expected $LINUX_EXPECTED_COMMIT, found $base_commit"
+
+    git -C "$KERNEL_DIR" merge-base --is-ancestor "$LINUX_EXPECTED_COMMIT" HEAD ||
+        die "Kernel tree is not based on pinned Linux commit $LINUX_EXPECTED_COMMIT"
 }
 
 fetch_vendor_commit() {
@@ -139,8 +165,8 @@ extract_vendor_sources() {
         fe1e3fe9f697376cf27d14365846838f368cccb6519c130519daa2b842be2d6b
 }
 
-port_vendor_sources_to_v616() {
-    log "Applying the reviewed Linux 6.16 compatibility port."
+port_vendor_sources_to_lts() {
+    log "Applying the reviewed Linux 6.18 LTS compatibility port."
 
     export KERNEL_DIR PCIE_DIR PHY_DRIVER
     run python3 <<'PY'
@@ -465,13 +491,13 @@ PY
 add_usb3_reference_clock() {
     log "Adding the missing A523 USB3/PCIe 100 MHz reference clock."
 
-    export CCU_DRIVER CCU_HEADER CLOCK_BINDING
+    export CCU_DRIVER CLOCK_BINDING
     run python3 <<'PY'
 from pathlib import Path
 import os
 
+
 driver_path = Path(os.environ["CCU_DRIVER"])
-header_path = Path(os.environ["CCU_HEADER"])
 binding_path = Path(os.environ["CLOCK_BINDING"])
 
 
@@ -488,35 +514,29 @@ binding = binding_path.read_text(encoding="utf-8")
 if "#define CLK_USB3_REF" not in binding:
     binding = replace_once(
         binding,
-        "#define CLK_FANOUT2\t\t178\n",
-        "#define CLK_FANOUT2\t\t178\n#define CLK_USB3_REF\t\t179\n",
-        "clock binding tail",
+        "#define CLK_NPU\t\t\t179\n",
+        "#define CLK_NPU\t\t\t179\n#define CLK_USB3_REF\t\t180\n",
+        "6.18 clock binding tail",
     )
+if "#define CLK_USB3_REF\t\t180" not in binding:
+    raise SystemExit("PCIe clock: CLK_USB3_REF must be clock ID 180 on Linux 6.18")
 binding_path.write_text(binding, encoding="utf-8")
 
-header = header_path.read_text(encoding="utf-8")
-header = header.replace(
-    "#define CLK_NUMBER\t(CLK_FANOUT2 + 1)",
-    "#define CLK_NUMBER\t(CLK_USB3_REF + 1)",
-)
-if "#define CLK_NUMBER\t(CLK_USB3_REF + 1)" not in header:
-    raise SystemExit("PCIe clock: CLK_NUMBER was not updated")
-header_path.write_text(header, encoding="utf-8")
 
 driver = driver_path.read_text(encoding="utf-8")
 if "static SUNXI_CCU_M_DATA_WITH_MUX_GATE(usb3_ref_clk" not in driver:
     clock_block = """static const struct clk_parent_data usb3_ref_parents[] = {
-	{ .fw_name = "hosc" },
-	{ .hw = &pll_periph0_200M_clk.hw },
-	{ .hw = &pll_periph1_200M_clk.hw },
+\t{ .fw_name = \"hosc\" },
+\t{ .hw = &pll_periph0_200M_clk.hw },
+\t{ .hw = &pll_periph1_200M_clk.hw },
 };
 
-static SUNXI_CCU_M_DATA_WITH_MUX_GATE(usb3_ref_clk, "usb3-ref",
-				      usb3_ref_parents, 0xa84,
-				      0, 5,
-				      24, 3,
-				      BIT(31),
-				      0);
+static SUNXI_CCU_M_DATA_WITH_MUX_GATE(usb3_ref_clk, \"usb3-ref\",
+\t\t\t\t      usb3_ref_parents, 0xa84,
+\t\t\t\t      0, 5,
+\t\t\t\t      24, 3,
+\t\t\t\t      BIT(31),
+\t\t\t\t      0);
 
 """
     driver = replace_once(
@@ -541,6 +561,14 @@ if "\t\t[CLK_USB3_REF]\t\t= &usb3_ref_clk.common.hw,\n" not in driver:
         "\t\t[CLK_USB3_REF]\t\t= &usb3_ref_clk.common.hw,\n"
         "\t\t[CLK_PCIE_AUX]\t\t= &pcie_aux_clk.common.hw,\n",
         "CCU hardware clock array",
+    )
+
+if "\t.num\t= CLK_USB3_REF + 1,\n" not in driver:
+    driver = replace_once(
+        driver,
+        "\t.num\t= CLK_NPU + 1,\n",
+        "\t.num\t= CLK_USB3_REF + 1,\n",
+        "CCU onecell clock count",
     )
 
 driver_path.write_text(driver, encoding="utf-8")
@@ -716,7 +744,6 @@ validate_sources() {
         "$SOC_DTSI"
         "$BOARD_DTS"
         "$CCU_DRIVER"
-        "$CCU_HEADER"
         "$CLOCK_BINDING"
         "$POWER_BINDING"
         "$PCIE_DIR/Kconfig"
@@ -737,7 +764,7 @@ validate_sources() {
 
     grep -Eq '^#define[[:space:]]+PD_PCIE[[:space:]]+7([[:space:]]|$)' \
         "$POWER_BINDING" || die "PD_PCIE power-domain binding is unavailable."
-    grep -Eq '^#define[[:space:]]+CLK_USB3_REF[[:space:]]+179([[:space:]]|$)' \
+    grep -Eq '^#define[[:space:]]+CLK_USB3_REF[[:space:]]+180([[:space:]]|$)' \
         "$CLOCK_BINDING" || die "CLK_USB3_REF binding is missing or incorrect."
     grep -qF 'usb3_ref_clk, "usb3-ref"' "$CCU_DRIVER" ||
         die "USB3/PCIe reference clock implementation is missing."
@@ -853,9 +880,11 @@ write_stamp_and_report() {
         printf 'bsp_repository=%s\n' "$BSP_REPOSITORY"
         printf 'bsp_ref=%s\n' "$BSP_REF"
         printf 'bsp_commit=%s\n' "$BSP_EXPECTED_COMMIT"
-        printf 'linux_compatibility=6.16\n'
-        printf 'dt_layout=mainline-soc-one-cell-v3\n'
-        printf 'driver_mode=initramfs-modules-v3\n'
+        printf 'linux_ref=%s\n' "$LINUX_REF"
+        printf 'linux_base_commit=%s\n' "$LINUX_EXPECTED_COMMIT"
+        printf 'linux_compatibility=6.18-lts\n'
+        printf 'dt_layout=mainline-soc-one-cell-v4\n'
+        printf 'driver_mode=initramfs-modules-v4\n'
         printf 'pcie_controller=allwinner,sunxi-pcie-v210-rc\n'
         printf 'pcie_link=gen2-x1\n'
         printf 'pcie_controller_driver=initramfs-module\n'
@@ -868,6 +897,8 @@ write_stamp_and_report() {
         printf 'Cubie A5E PCIe/NVMe backport report\n'
         printf '===================================\n'
         printf 'Status: PASS\n'
+        printf 'Linux ref: %s\n' "$LINUX_REF"
+        printf 'Linux base commit: %s\n' "$LINUX_EXPECTED_COMMIT"
         printf 'BSP commit: %s\n' "$BSP_EXPECTED_COMMIT"
         printf 'PCIe controller: allwinner,sunxi-pcie-v210-rc\n'
         printf 'PCIe capability: Gen2 x1\n'
@@ -886,7 +917,6 @@ write_stamp_and_report() {
 commit_port() {
     git -C "$KERNEL_DIR" add -- \
         drivers/clk/sunxi-ng/ccu-sun55i-a523.c \
-        drivers/clk/sunxi-ng/ccu-sun55i-a523.h \
         drivers/pci/controller/Kconfig \
         drivers/pci/controller/Makefile \
         drivers/pci/controller/sunxi \
@@ -899,7 +929,7 @@ commit_port() {
 
     if ! git -C "$KERNEL_DIR" diff --cached --quiet; then
         run git -C "$KERNEL_DIR" commit \
-            -m "arm64: allwinner: port A523 PCIe and combo PHY to v6.16"
+            -m "arm64: allwinner: port A523 PCIe and combo PHY to 6.18 LTS"
     fi
 }
 
@@ -935,7 +965,7 @@ main() {
 
     fetch_vendor_commit
     extract_vendor_sources
-    port_vendor_sources_to_v616
+    port_vendor_sources_to_lts
     add_usb3_reference_clock
     add_pcie_device_tree
     validate_sources
@@ -944,7 +974,7 @@ main() {
     commit_port
     write_stamp_and_report
 
-    log "Allwinner PCIe/PHY port and Cubie A5E NVMe DT path verified."
+    log "Allwinner PCIe/PHY Linux 6.18 LTS port and Cubie A5E NVMe DT path verified."
     log "PCIe report: $PCIE_REPORT"
 }
 
