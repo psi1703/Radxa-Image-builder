@@ -2,6 +2,10 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
+# Use a deterministic administrative PATH so rsetup and its self-tests behave
+# the same for normal users, sudo sessions and non-login environments.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 readonly RADXA_RSETUP="/usr/bin/rsetup"
 readonly CUBIE_UPDATE="/usr/local/sbin/cubie-a5e-update"
 readonly CUBIE_NVME_INSTALL="/usr/local/sbin/cubie-a5e-install-nvme"
@@ -10,9 +14,14 @@ rsetup_self_test() {
     local command_name
     local required_commands=(
         apt-get
+        blkid
         dtc
+        ethtool
+        iw
         jq
+        lspci
         nmcli
+        nvme
         parted
         python3
         rfkill
@@ -23,6 +32,7 @@ rsetup_self_test() {
     )
     local required_files=(
         "$RADXA_RSETUP"
+        "$CUBIE_UPDATE"
         "$CUBIE_NVME_INSTALL"
         /usr/lib/librtui/tui.sh
         /usr/lib/librtui/utils/utils.sh
@@ -62,12 +72,15 @@ rsetup_self_test() {
         return 1
     }
 
+    [[ -x "$CUBIE_UPDATE" ]] || {
+        printf 'rsetup self-test: not executable: %s\n' "$CUBIE_UPDATE" >&2
+        return 1
+    }
+
     [[ -x "$CUBIE_NVME_INSTALL" ]] || {
         printf 'rsetup self-test: not executable: %s\n' "$CUBIE_NVME_INSTALL" >&2
         return 1
     }
-
-    "$CUBIE_NVME_INSTALL" --self-test || return 1
 
     for command_name in "${required_commands[@]}"; do
         command -v "$command_name" >/dev/null 2>&1 || {
@@ -75,6 +88,8 @@ rsetup_self_test() {
             return 1
         }
     done
+
+    "$CUBIE_NVME_INSTALL" --self-test || return 1
 
     export DEBUG=false
     export LANG=C
@@ -95,7 +110,6 @@ rsetup_self_test() {
 
     printf 'rsetup self-test: PASS\n'
 }
-
 
 run_full_system_upgrade() {
     local prompt
