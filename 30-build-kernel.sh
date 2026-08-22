@@ -228,7 +228,7 @@ configure_kernel() {
         CFG80211_USE_KERNEL_REGDB_KEYS
         MAC80211 RFKILL MMC MMC_SUNXI PWRSEQ_SIMPLE
         FW_LOADER PHYLIB
-        REALTEK_PHY STMMAC_ETH STMMAC_PLATFORM DWMAC_SUN8I
+        STMMAC_ETH STMMAC_PLATFORM DWMAC_SUN8I
         DWMAC_SUN55I SUN55I_PCK600 PM_GENERIC_DOMAINS
         PCI PCI_MSI
         NVME_CORE BLK_DEV_NVME
@@ -251,10 +251,15 @@ configure_kernel() {
         enable_kernel_module "$option"
     done
 
-    # Cubie A5E Ethernet uses the Realtek RTL8211F PHY. The generic arm64
-    # defconfig can enable the unrelated Microsemi VSC85xx PHY driver, whose
-    # firmware references make update-initramfs emit missing-firmware warnings.
-    # Disable that unused driver rather than adding irrelevant firmware.
+    # Cubie A5E hardware reports Maxio MAE0621A/B-Q3C(I) PHY ID
+    # 0x7b744412 on both Ethernet ports. Linux 6.18.45 has no mature upstream
+    # dedicated Maxio driver in this baseline, so the proven runtime uses the
+    # generic PHYLIB binding. Do not force an unrelated vendor PHY driver.
+    #
+    # The generic arm64 defconfig can enable the unrelated Microsemi VSC85xx
+    # PHY driver, whose firmware references make update-initramfs emit
+    # missing-firmware warnings. Disable that unused driver rather than adding
+    # irrelevant firmware.
     disable_kernel_option "MICROSEMI_PHY"
 
     run make -C "$KERNEL_DIR" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
@@ -267,7 +272,7 @@ validate_kernel_config() {
         CONFIG_MAC80211 CONFIG_RFKILL CONFIG_MMC
         CONFIG_MMC_SUNXI CONFIG_PWRSEQ_SIMPLE CONFIG_FW_LOADER
         CONFIG_PHYLIB
-        CONFIG_REALTEK_PHY CONFIG_STMMAC_ETH CONFIG_STMMAC_PLATFORM
+        CONFIG_STMMAC_ETH CONFIG_STMMAC_PLATFORM
         CONFIG_DWMAC_SUN8I CONFIG_DWMAC_SUN55I CONFIG_SUN55I_PCK600
         CONFIG_PCI CONFIG_PCI_MSI CONFIG_AW_PCIE_RC
         CONFIG_PHY_SUNXI_INNO_COMBOPHY CONFIG_NVME_CORE
@@ -291,6 +296,9 @@ validate_kernel_config() {
         die "CONFIG_AW_PCIE_RC must be a module."
     grep -Fxq 'CONFIG_PHY_SUNXI_INNO_COMBOPHY=m' "$KERNEL_CONFIG" ||
         die "CONFIG_PHY_SUNXI_INNO_COMBOPHY must be a module."
+
+    grep -Eq '^CONFIG_PHYLIB=(y|m)$' "$KERNEL_CONFIG" ||
+        die "CONFIG_PHYLIB must remain enabled for the Maxio PHY generic binding."
 
     grep -Fxq '# CONFIG_MICROSEMI_PHY is not set' "$KERNEL_CONFIG" ||
         die "CONFIG_MICROSEMI_PHY must be disabled to avoid unused VSC85xx firmware references."
@@ -626,7 +634,9 @@ write_reports() {
         printf 'PCIe root complex: Allwinner v210, Gen2 x1, module\n'
         printf 'PCIe combo PHY: Innosilicon, module\n'
         printf 'NVMe host driver: built in\n'
-        printf 'Ethernet PHY driver: Realtek enabled; unused Microsemi VSC85xx driver disabled\n'
+        printf 'Ethernet PHY: Maxio MAE0621A/B-Q3C(I), PHY ID 0x7b744412, generic PHYLIB binding on Linux 6.18.45\n'
+        printf 'Dedicated Maxio PHY backport: not used\n'
+        printf 'Unused Microsemi VSC85xx PHY driver disabled: yes\n'
         printf 'A523 SPI0 controller driver: built in\n'
         printf 'SPI-NOR framework: built in\n'
         printf 'Cubie A5E SPI-NOR maximum frequency: 20000000 Hz\n'
