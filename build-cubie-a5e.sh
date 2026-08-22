@@ -12,12 +12,31 @@ source "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=config/source-pins.env
 source "$SCRIPT_DIR/config/source-pins.env"
 
+KERNEL_REF_LABEL="${LINUX_REF#v}"
+[[ "$KERNEL_REF_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] ||
+    die "LINUX_REF is not safe for kernel workspace/artifact naming: $LINUX_REF"
+readonly KERNEL_REF_LABEL
+
 STAGE_NAME="WRAPPER"
+
+# Detect an explicit build request before applying defaults. This lets an
+# interactive invocation show the menu while preserving environment-driven
+# automation exactly as before.
+BUILD_REQUEST_ENV_PRESENT=0
+for build_request_var in \
+    BUILD_MODE OUTPUT_MODE TARGET_DEVICE CONFIRM_WRITE KERNEL_REBUILD AIC_REBUILD \
+    ROOTFS_REBUILD IMAGE_OUTPUT IMAGE_SIZE_GIB IMAGE_OVERWRITE; do
+    if [[ -v $build_request_var ]]; then
+        BUILD_REQUEST_ENV_PRESENT=1
+        break
+    fi
+done
+readonly BUILD_REQUEST_ENV_PRESENT
 
 BUILD_ROOT="${BUILD_ROOT:-$SCRIPT_DIR/build}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-$BUILD_ROOT/downloads}"
 INPUT_DIR="${INPUT_DIR:-$DOWNLOAD_DIR}"
-KERNEL_DIR="${KERNEL_DIR:-$BUILD_ROOT/linux-6.16-one-shot}"
+KERNEL_DIR="${KERNEL_DIR:-$BUILD_ROOT/linux-${KERNEL_REF_LABEL}-one-shot}"
 AIC_REPO="${AIC_REPO:-$BUILD_ROOT/aic8800-radxa}"
 ROOTFS_DIR="${ROOTFS_DIR:-$BUILD_ROOT/rootfs}"
 BASE_IMAGE_BUILDER="${BASE_IMAGE_BUILDER:-$SCRIPT_DIR/base/build-debian13-donor-image.sh}"
@@ -43,7 +62,7 @@ IMAGE_XZ_LEVEL="${IMAGE_XZ_LEVEL:-6}"
 IMAGE_XZ_THREADS="${IMAGE_XZ_THREADS:-0}"
 IMAGE_OVERWRITE="${IMAGE_OVERWRITE:-0}"
 IMAGE_OUTPUT_DIR="/home/psi"
-IMAGE_OUTPUT="${IMAGE_OUTPUT:-$IMAGE_OUTPUT_DIR/cubie-a5e-debian13-linux6.16-${BUILD_ID}.img.xz}"
+IMAGE_OUTPUT="${IMAGE_OUTPUT:-$IMAGE_OUTPUT_DIR/cubie-a5e-debian13-linux${KERNEL_REF_LABEL}-${BUILD_ID}.img.xz}"
 IMAGE_RAW="${IMAGE_OUTPUT%.xz}"
 LOG_ROOT="${LOG_ROOT:-$BUILD_ROOT/logs}"
 LOG_DIR="${LOG_DIR:-$LOG_ROOT/$BUILD_ID}"
@@ -480,7 +499,7 @@ validate_paths() {
     [[ "$normalized_input_dir" == "$normalized_build_root/downloads" ]] ||
         die "INPUT_DIR must be BUILD_ROOT/downloads: $normalized_input_dir"
 
-    [[ "$normalized_kernel_dir" == "$normalized_build_root/linux-6.16-one-shot" ]] ||
+    [[ "$normalized_kernel_dir" == "$normalized_build_root/linux-${KERNEL_REF_LABEL}-one-shot" ]] ||
         die "Unexpected KERNEL_DIR: $normalized_kernel_dir"
 
     [[ "$normalized_aic_repo" == "$normalized_build_root/aic8800-radxa" ]] ||
@@ -762,9 +781,9 @@ cleanup_previous_image_outputs() {
             -maxdepth 1 \
             -type f \
             \( \
-                -name 'cubie-a5e-debian13-linux6.16-*.img' \
-                -o -name 'cubie-a5e-debian13-linux6.16-*.img.xz' \
-                -o -name 'cubie-a5e-debian13-linux6.16-*.img.xz.sha256' \
+                -name "cubie-a5e-debian13-linux${KERNEL_REF_LABEL}-*.img" \
+                -o -name "cubie-a5e-debian13-linux${KERNEL_REF_LABEL}-*.img.xz" \
+                -o -name "cubie-a5e-debian13-linux${KERNEL_REF_LABEL}-*.img.xz.sha256" \
             \) \
             -print0
     )
@@ -1002,6 +1021,206 @@ confirm_target_destruction() {
     [[ "$answer" == "I-UNDERSTAND" ]] || die "Confirmation not given."
 }
 
+print_usage() {
+    cat <<EOF_USAGE
+Usage:
+  sudo ./$SCRIPT_NAME                  Interactive build menu
+  sudo ./$SCRIPT_NAME --menu           Interactive build menu
+  ./$SCRIPT_NAME --validate             Validate repository sources/scripts
+  ./$SCRIPT_NAME --show-pins            Show pinned upstream sources
+  ./$SCRIPT_NAME --help                 Show this help
+
+Non-interactive builds remain environment driven, for example:
+  sudo env OUTPUT_MODE=etcher-image ./$SCRIPT_NAME
+  sudo env BUILD_MODE=update-bundle ./$SCRIPT_NAME
+  sudo env BUILD_MODE=update-bundle KERNEL_REBUILD=1 AIC_REBUILD=1 ./$SCRIPT_NAME
+  sudo env OUTPUT_MODE=device TARGET_DEVICE=/dev/sdX ./$SCRIPT_NAME
+EOF_USAGE
+}
+
+menu_pause() {
+    printf '\nPress Enter to return to the menu...' >&2
+    IFS= read -r _
+}
+
+show_source_pins() {
+    printf '\nCurrent reproducible source pins:\n\n'
+    sed -n \
+        -e '/^LINUX_/p' \
+        -e '/^BSP_/p' \
+        -e '/^AIC_/p' \
+        -e '/^RADXA_UBOOT_VERSION=/p' \
+        "$SCRIPT_DIR/config/source-pins.env"
+}
+
+show_build_menu_header() {
+    clear 2>/dev/null || true
+    cat <<EOF_HEADER
+============================================================
+             Radxa Cubie A5E Build Manager
+============================================================
+Kernel pin : ${LINUX_REF:-unknown}
+AIC8800    : ${AIC_REF:-unknown}
+Radxa BSP  : ${BSP_REF:-unknown}
+Repo       : $SCRIPT_DIR
+============================================================
+EOF_HEADER
+}
+
+run_menu_build() {
+    local description="$1"
+    shift
+
+    printf '\n%s\n\n' "$description"
+
+    if [[ "$(id -u)" -eq 0 ]]; then
+        env "$@" "$SCRIPT_DIR/$SCRIPT_NAME"
+    else
+        command -v sudo >/dev/null 2>&1 || {
+            printf 'ERROR: sudo is required to run a build from the menu.\n' >&2
+            return 1
+        }
+        sudo env "$@" "$SCRIPT_DIR/$SCRIPT_NAME"
+    fi
+}
+
+run_repository_validation() {
+    local validator="$SCRIPT_DIR/tools/validate-repository.sh"
+
+    [[ -x "$validator" ]] || {
+        printf 'ERROR: repository validator is missing or not executable: %s\n' "$validator" >&2
+        return 1
+    }
+
+    "$validator"
+}
+
+interactive_menu() {
+    local choice
+    local target
+
+    while true; do
+        show_build_menu_header
+        cat <<'EOF_MENU'
+1. Build complete Balena Etcher image
+2. Build complete image directly to a device
+3. Build signed kernel / board update bundle
+4. Force clean kernel + AIC8800 rebuild and signed update bundle
+5. Rebuild Debian rootfs and complete Etcher image
+6. Validate repository scripts and policy
+7. Show source pins
+8. Exit
+EOF_MENU
+        printf '\nSelect an option [1-8]: '
+        IFS= read -r choice || return 0
+
+        case "$choice" in
+            1)
+                run_menu_build \
+                    'Building complete compressed Balena Etcher image.' \
+                    BUILD_MODE=image \
+                    OUTPUT_MODE=etcher-image || true
+                menu_pause
+                ;;
+            2)
+                printf '\nEnter the whole target block device (example: /dev/sdb): '
+                IFS= read -r target || return 0
+                if [[ "$target" != /dev/* ]]; then
+                    printf 'Invalid target device: %s\n' "$target" >&2
+                    menu_pause
+                    continue
+                fi
+                run_menu_build \
+                    "Building complete image directly to $target." \
+                    BUILD_MODE=image \
+                    OUTPUT_MODE=device \
+                    TARGET_DEVICE="$target" || true
+                menu_pause
+                ;;
+            3)
+                run_menu_build \
+                    'Building signed kernel/board update bundle from the currently pinned sources.' \
+                    BUILD_MODE=update-bundle || true
+                menu_pause
+                ;;
+            4)
+                run_menu_build \
+                    'Forcing clean kernel and AIC8800 rebuilds, then creating the signed update bundle.' \
+                    BUILD_MODE=update-bundle \
+                    KERNEL_REBUILD=1 \
+                    AIC_REBUILD=1 || true
+                menu_pause
+                ;;
+            5)
+                run_menu_build \
+                    'Rebuilding the Debian rootfs and creating a complete compressed image.' \
+                    BUILD_MODE=image \
+                    OUTPUT_MODE=etcher-image \
+                    ROOTFS_REBUILD=1 || true
+                menu_pause
+                ;;
+            6)
+                run_repository_validation || true
+                menu_pause
+                ;;
+            7)
+                show_source_pins
+                menu_pause
+                ;;
+            8)
+                return 0
+                ;;
+            *)
+                printf 'Invalid selection: %s\n' "$choice" >&2
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+frontend_dispatch() {
+    local arg="${1:-}"
+
+    case "$arg" in
+        --help|-h)
+            print_usage
+            return 0
+            ;;
+        --menu)
+            [[ $# -eq 1 ]] || { print_usage >&2; return 2; }
+            interactive_menu
+            return 0
+            ;;
+        --validate)
+            [[ $# -eq 1 ]] || { print_usage >&2; return 2; }
+            run_repository_validation
+            return 0
+            ;;
+        --show-pins)
+            [[ $# -eq 1 ]] || { print_usage >&2; return 2; }
+            show_source_pins
+            return 0
+            ;;
+        '')
+            if ((BUILD_REQUEST_ENV_PRESENT == 0)); then
+                if [[ -t 0 && -t 1 ]]; then
+                    interactive_menu
+                    return 0
+                fi
+                printf 'ERROR: no build mode was selected for a non-interactive invocation.\n\n' >&2
+                print_usage >&2
+                return 2
+            fi
+            return 10
+            ;;
+        *)
+            printf 'ERROR: unknown argument: %s\n\n' "$arg" >&2
+            print_usage >&2
+            return 2
+            ;;
+    esac
+}
+
 write_summary() {
     local finish_epoch
     local elapsed
@@ -1146,4 +1365,12 @@ main() {
     log "============================================================"
 }
 
-main "$@"
+dispatch_rc=0
+frontend_dispatch "$@" || dispatch_rc=$?
+case "$dispatch_rc" in
+    0) exit 0 ;;
+    10) ;;
+    *) exit "$dispatch_rc" ;;
+esac
+
+main
