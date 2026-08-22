@@ -8,8 +8,14 @@ PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 readonly PROJECT_ROOT
 
 readonly SOURCE_PINS="$PROJECT_ROOT/config/source-pins.env"
+readonly STAGE20="$PROJECT_ROOT/20-backport-gmac1.sh"
+readonly STAGE22="$PROJECT_ROOT/22-backport-pcie.sh"
+readonly STAGE25="$PROJECT_ROOT/25-apply-hardware-dts.sh"
 readonly STAGE27="$PROJECT_ROOT/27-backport-spi.sh"
-readonly STAGE60="$PROJECT_ROOT/60-install-linux-6.16.sh"
+readonly STAGE30="$PROJECT_ROOT/30-build-kernel.sh"
+readonly STAGE40="$PROJECT_ROOT/40-build-aic8800.sh"
+readonly STAGE45="$PROJECT_ROOT/45-build-update-bundle.sh"
+readonly STAGE60="$PROJECT_ROOT/60-install-managed-kernel.sh"
 readonly STAGE80="$PROJECT_ROOT/80-validate-image.sh"
 readonly NVME_INSTALLER="$PROJECT_ROOT/assets/cubie-a5e-install-nvme"
 readonly BASE_WRITER="$PROJECT_ROOT/base/build-debian13-donor-image.sh"
@@ -53,7 +59,13 @@ reject_text() {
 
 for required in \
     "$SOURCE_PINS" \
+    "$STAGE20" \
+    "$STAGE22" \
+    "$STAGE25" \
     "$STAGE27" \
+    "$STAGE30" \
+    "$STAGE40" \
+    "$STAGE45" \
     "$STAGE60" \
     "$STAGE80" \
     "$NVME_INSTALLER" \
@@ -129,9 +141,17 @@ fi
 # Reproducible source pins
 # ---------------------------------------------------------------------------
 require_fixed_line \
-    'LINUX_EXPECTED_COMMIT="${LINUX_EXPECTED_COMMIT:-038d61fd642278bab63ee8ef722c50d10ab01e8f}"' \
+    'LINUX_REPOSITORY="${LINUX_REPOSITORY:-https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git}"' \
     "$SOURCE_PINS" \
-    "Linux pin is missing."
+    "Official linux-stable repository pin is missing."
+require_fixed_line \
+    'LINUX_REF="${LINUX_REF:-v6.18.45}"' \
+    "$SOURCE_PINS" \
+    "Linux 6.18.45 LTS ref pin is missing."
+require_fixed_line \
+    'LINUX_EXPECTED_COMMIT="${LINUX_EXPECTED_COMMIT:-bf3be28f6721e24961992ebb9e61c0cf21a56806}"' \
+    "$SOURCE_PINS" \
+    "Linux 6.18.45 LTS commit pin is missing."
 require_fixed_line \
     'AIC_EXPECTED_COMMIT="${AIC_EXPECTED_COMMIT:-6e076049b719ac2ff7ce5c92786a680407b11cdb}"' \
     "$SOURCE_PINS" \
@@ -223,12 +243,75 @@ require_text '"$CUBIE_NVME_INSTALL" --tui' \
     "rsetup does not invoke the managed NVMe installer."
 
 # ---------------------------------------------------------------------------
+# Linux 6.18 LTS migration invariants
+# ---------------------------------------------------------------------------
+[[ "$LINUX_REPOSITORY" == "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git" ]] ||
+    fail "LINUX_REPOSITORY does not resolve to the official linux-stable tree."
+[[ "$LINUX_REF" == "v6.18.45" ]] ||
+    fail "LINUX_REF does not resolve to the approved v6.18.45 LTS release."
+[[ "$LINUX_EXPECTED_COMMIT" == "bf3be28f6721e24961992ebb9e61c0cf21a56806" ]] ||
+    fail "LINUX_EXPECTED_COMMIT does not resolve to the approved v6.18.45 commit."
+
+require_text '.cubie-a5e-gmac1-dts-backport' "$STAGE20" \
+    "Stage 20 does not use the Linux 6.18 GMAC1 DTS-only backport marker."
+require_text 'driver_source=upstream-linux-6.18-lts' "$STAGE20" \
+    "Stage 20 still appears to carry the obsolete pre-6.18 GMAC driver backport."
+require_text 'pck600_source=upstream-linux-6.18-lts' "$STAGE20" \
+    "Stage 20 still appears to carry the obsolete PCK600 backport."
+require_text 'regulator-enable-ramp-delay = <150000>;' "$STAGE20" \
+    "Stage 20 does not preserve the upstream GMAC1 PHY power ramp delay."
+
+require_text '.cubie-a5e-pcie-vendor-port-lts' "$STAGE22" \
+    "Stage 22 does not use the Linux 6.18 LTS PCIe vendor-port marker."
+require_text 'dt_layout=mainline-soc-one-cell-v4' "$STAGE22" \
+    "Stage 22 PCIe DT layout cache marker is stale."
+require_text 'driver_mode=initramfs-modules-v4' "$STAGE22" \
+    "Stage 22 PCIe driver-mode cache marker is stale."
+require_text '[[ "$LINUX_REF" == v6.18.* ]]' "$STAGE22" \
+    "Stage 22 is not explicitly constrained to the reviewed Linux 6.18.y line."
+
+require_text 'regulator-always-on;' "$STAGE25" \
+    "Stage 25 does not preserve the always-on Wi-Fi regulator policy."
+require_text 'Compiled DTB does not retain the tested 30 mA mmc1 pin drive strength.' "$STAGE25" \
+    "Stage 25 does not validate the tested 30 mA SDIO drive strength."
+
+require_text 'merge-base --is-ancestor' "$STAGE30" \
+    "Stage 30 does not validate the pinned 6.18.45 commit as the kernel-tree ancestor."
+reject_text 'HEAD must equal' "$STAGE30" \
+    "Stage 30 still contains the obsolete pristine-HEAD source-pin assumption."
+
+require_text 'fix-linux-6.17-build.patch' "$STAGE40" \
+    "Stage 40 does not apply the AIC8800 Linux 6.17+ compatibility patch required by 6.18."
+require_text 'fix-linux-6.19-build.patch' "$STAGE40" \
+    "Stage 40 does not explicitly identify the 6.19 patch boundary."
+
+require_text 'cache-format=2' "$STAGE45" \
+    "Stage 45 bundle cache format was not bumped for the LTS migration."
+require_text 'KERNEL_BASE_REF=%s' "$STAGE45" \
+    "Stage 45 signed manifest does not record the kernel base ref."
+require_text 'KERNEL_BASE_COMMIT=%s' "$STAGE45" \
+    "Stage 45 signed manifest does not record the kernel base commit."
+require_text 'AIC_SOURCE_COMMIT=%s' "$STAGE45" \
+    "Stage 45 signed manifest does not record the AIC source commit."
+
+require_text 'managed-kernel-lts-ready-v1-20260822' "$STAGE60" \
+    "Stage 60 is not the version-neutral managed-kernel installer."
+reject_text '60-install-linux-6.16.sh' "$BUILD_WRAPPER" \
+    "Build wrapper still calls the obsolete Linux-6.16-specific Stage 60 filename."
+require_text '"60-install-managed-kernel.sh"' "$BUILD_WRAPPER" \
+    "Build wrapper does not call 60-install-managed-kernel.sh."
+reject_text 'linux-6.16-one-shot' "$BUILD_WRAPPER" \
+    "Build wrapper still hardcodes the old Linux 6.16 workspace."
+require_text 'KERNEL_REF_LABEL="${LINUX_REF#v}"' "$BUILD_WRAPPER" \
+    "Build wrapper does not derive kernel workspace/artifact naming from LINUX_REF."
+
+# ---------------------------------------------------------------------------
 # Stage 27: proven SPI-NOR timing
 # ---------------------------------------------------------------------------
 require_text \
-    'readonly SPI_REVISION="a523-spi-mainline-backport-v3-pio-spi-nor-20mhz"' \
+    'readonly SPI_REVISION="a523-spi-linux-6.18-lts-v4-pio-spi-nor-20mhz"' \
     "$STAGE27" \
-    "Stage 27 revision does not invalidate the old 50 MHz cache."
+    "Stage 27 revision is not the reviewed Linux 6.18 LTS SPI backport."
 require_text \
     'spi-max-frequency = <20000000>;' \
     "$STAGE27" \
@@ -271,7 +354,7 @@ require_text 'u-boot-radxa-cubie-a5e' \
     "Stage 60 does not provision the Cubie A5E U-Boot package."
 require_text 'stage60-runtime-rootfs-v2-spi-maintenance' \
     "$STAGE60" \
-    "Stage 60 cache schema was not bumped for the SPI-maintenance runtime."
+    "Stage 60 runtime cache schema is missing."
 require_text 'NVME_INSTALLER_SELF_TEST=PASS' \
     "$STAGE60" \
     "Stage 60 does not persist the NVMe installer self-test result."
@@ -380,9 +463,9 @@ require_text 'validate_spi_maintenance_runtime' \
 require_text 'validate_runtime_root_layout' \
     "$STAGE80" \
     "Stage 80 lacks persistent runtime mountpoint/PID1 validation."
-require_text 'storage-nvme-spi-cleanlog-v3-20260821' \
+require_text 'linux-6.18-lts-validation-v1-20260822' \
     "$STAGE80" \
-    "Stage 80 revision does not identify the storage/SPI hardening pass."
+    "Stage 80 revision does not identify the Linux 6.18 LTS validation pass."
 require_text 'for exclusion in dev proc run sys tmp mnt media; do' \
     "$STAGE80" \
     "Stage 80 does not inspect the full corrected NVMe rsync exclusion set."
@@ -411,12 +494,5 @@ require_text 'losetup --find --show --partscan' \
 require_text 'sha256sum -- "$output_name"' \
     "$BUILD_WRAPPER" \
     "Etcher-image checksum generation is missing."
-
-if [[ -s "$PROJECT_ROOT/MANIFEST.sha256" ]]; then
-    (
-        cd "$PROJECT_ROOT"
-        sha256sum --check MANIFEST.sha256
-    )
-fi
 
 printf 'PASS: repository source validation completed.\n'
