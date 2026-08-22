@@ -17,6 +17,7 @@ export STAGE_NAME="AIC8800"
 : "${CROSS_COMPILE:?CROSS_COMPILE is not set}"
 : "${JOBS:?JOBS is not set}"
 : "${AIC_INPUT_FINGERPRINT:?AIC_INPUT_FINGERPRINT is not set}"
+: "${AIC_EXPECTED_COMMIT:?AIC_EXPECTED_COMMIT is not set}"
 : "${KERNEL_REBUILD:=0}"
 : "${AIC_REBUILD:=0}"
 
@@ -249,33 +250,25 @@ fi
 apply_radxa_sdio_patches() {
 local next_patch
 
-log "Applying applicable Radxa SDIO packaging patches."
+log "Applying Radxa AIC8800 packaging patches through Linux 6.17 compatibility."
 
 (
+    local reached_linux_617=0
+
     cd "$AIC_REPO"
-
     export QUILT_PATCHES="debian/patches"
-
-    if ! command -v quilt >/dev/null 2>&1; then
-        log "quilt is unavailable; using the current AIC8800 source state."
-        exit 0
-    fi
 
     while :; do
         next_patch="$(quilt next 2>/dev/null || true)"
         [[ -n "$next_patch" ]] || break
 
         case "$next_patch" in
-            *fix-usb-build.patch | \
-            *fix-aic_btusb-use-bluez-by-default.patch | \
-            *fix-usbc1-controller-wifi-rate-of-sun60iw2p1.patch | \
-            *fix-linux-6.17-build.patch | \
-            *fix-linux-6.19-build.patch | \
-            *fix-build-on-low-memory-devices*.patch | \
             *fix-Lower-the-debugging-log-level.patch | \
+            *fix-linux-6.19-build.patch | \
             *fix-vmalloc-not-include.patch | \
-            *fix-linux-7.1-build.patch)
-                log "Stopping quilt before unrelated or post-6.16 patch: $next_patch"
+            *fix-build-on-low-memory-devices*.patch | \
+            *fix-linux-7.1-build.patch | \
+            *fix-usb-suspend-reboot-hang.patch)
                 break
                 ;;
         esac
@@ -283,13 +276,31 @@ log "Applying applicable Radxa SDIO packaging patches."
         log "Applying quilt patch: $next_patch"
         quilt push
 
-        if [[ "$next_patch" == *fix-linux-6.16-build.patch ]]; then
-            log "Reached Linux 6.16 compatibility patch."
+        if [[ "$next_patch" == *fix-linux-6.17-build.patch ]]; then
+            reached_linux_617=1
             break
         fi
     done
+
+    [[ "$reached_linux_617" == "1" ]] ||
+        die "Radxa Linux 6.17 AIC8800 compatibility patch was not found/applied; refusing a Linux 6.18 build."
 )
 
+log "Applied Radxa Linux 6.17 compatibility patch required by Linux 6.18.y cfg80211 APIs."
+}
+
+validate_linux_618_sdio_compatibility() {
+local fdrv_main="$AIC_FDRV_DIR/rwnx_main.c"
+local fdrv_rx="$AIC_FDRV_DIR/rwnx_rx.c"
+
+require_nonempty_file "$fdrv_main"
+require_nonempty_file "$fdrv_rx"
+
+grep -F 'KERNEL_VERSION(6, 17, 0)' "$fdrv_main" >/dev/null ||
+    die "AIC8800 SDIO driver is missing the Linux 6.17+ cfg80211 callback compatibility changes."
+
+grep -F 'KERNEL_VERSION(6, 17, 0)' "$fdrv_rx" >/dev/null ||
+    die "AIC8800 SDIO RX path is missing the Linux 6.17+ cfg80211 compatibility changes."
 }
 
 ensure_vmalloc_headers() {
@@ -433,7 +444,7 @@ printf 'AIC driver directory: %s\n' "$AIC_DRIVER"
 printf 'AIC platform path: generic Linux SDIO\n'
 printf 'External RFKill/rescan module built: no\n'
 printf 'Bluetooth module built: no\n'
-printf 'Bluetooth exclusion reason: Linux 6.16 API incompatibility in vendor aic8800_btlpm source\n'
+printf 'Bluetooth exclusion reason: vendor aic8800_btlpm is outside the validated Cubie A5E SDIO Wi-Fi path\n'
 printf '\nProduced modules:\n'
 printf '%s\n' \
     "$AIC_BSP_MODULE" \
@@ -487,6 +498,7 @@ require_command sort
 require_command head
 require_command git
 require_command awk
+require_command quilt
 
 case "$KERNEL_REBUILD" in
     0 | 1) ;;
@@ -503,6 +515,11 @@ need_dir "$AIC_REPO"
 need_dir "$AIC_DRIVER"
 need_dir "$AIC_BSP_DIR"
 need_dir "$AIC_FDRV_DIR"
+
+local actual_aic_commit
+actual_aic_commit="$(git -C "$AIC_REPO" rev-parse HEAD)"
+[[ "$actual_aic_commit" == "$AIC_EXPECTED_COMMIT" ]] ||
+    die "AIC8800 source commit mismatch: expected=$AIC_EXPECTED_COMMIT actual=$actual_aic_commit"
 
 require_nonempty_file "$KERNEL_RELEASE_FILE"
 
@@ -522,7 +539,7 @@ actual_kernel_release="$(
 [[ "$actual_kernel_release" == "$KERNEL_RELEASE" ]] ||
     die "Kernel release mismatch: recorded=$KERNEL_RELEASE actual=$actual_kernel_release"
 
-log "AIC8800 automated Wi-Fi build starting with generic Linux SDIO binding."
+log "AIC8800 automated Wi-Fi build starting with generic Linux SDIO binding for $KERNEL_RELEASE."
 log "Kernel release: $KERNEL_RELEASE"
 log "Bluetooth module will not be built in this stage."
 
@@ -553,6 +570,7 @@ reset_aic_patch_state
 normalize_quilt_patch_line_endings
 validate_usb_patch_inputs
 apply_radxa_sdio_patches
+validate_linux_618_sdio_compatibility
 ensure_vmalloc_headers
 
 build_aic8800_bsp
