@@ -241,6 +241,14 @@ require_text 'Install the current Cubie A5E system to NVMe' \
 require_text '"$CUBIE_NVME_INSTALL" --tui' \
     "$RSETUP_WRAPPER" \
     "rsetup does not invoke the managed NVMe installer."
+require_fixed_line \
+    'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+    "$RSETUP_WRAPPER" \
+    "rsetup does not establish a deterministic administrative PATH before self-test handling."
+for runtime_command in blkid ethtool iw lspci nvme rfkill; do
+    require_text "$runtime_command" "$RSETUP_WRAPPER" \
+        "rsetup self-test does not include required field command: $runtime_command"
+done
 
 # ---------------------------------------------------------------------------
 # Linux 6.18 LTS migration invariants
@@ -279,6 +287,8 @@ require_text 'merge-base --is-ancestor' "$STAGE30" \
     "Stage 30 does not validate the pinned 6.18.45 commit as the kernel-tree ancestor."
 reject_text 'HEAD must equal' "$STAGE30" \
     "Stage 30 still contains the obsolete pristine-HEAD source-pin assumption."
+reject_text '--enable REALTEK_PHY' "$STAGE30" \
+    "Stage 30 still explicitly enables the irrelevant Realtek PHY driver; Cubie A5E uses Maxio PHY ID 0x7b744412."
 
 require_text 'fix-linux-6.17-build.patch' "$STAGE40" \
     "Stage 40 does not apply the AIC8800 Linux 6.17+ compatibility patch required by 6.18."
@@ -294,8 +304,8 @@ require_text 'KERNEL_BASE_COMMIT=%s' "$STAGE45" \
 require_text 'AIC_SOURCE_COMMIT=%s' "$STAGE45" \
     "Stage 45 signed manifest does not record the AIC source commit."
 
-require_text 'managed-kernel-lts-ready-v1-20260822' "$STAGE60" \
-    "Stage 60 is not the version-neutral managed-kernel installer."
+require_text 'managed-kernel-lts-field-runtime-v2-20260822' "$STAGE60" \
+    "Stage 60 is not the field-runtime managed-kernel installer."
 reject_text '60-install-linux-6.16.sh' "$BUILD_WRAPPER" \
     "Build wrapper still calls the obsolete Linux-6.16-specific Stage 60 filename."
 require_text '"60-install-managed-kernel.sh"' "$BUILD_WRAPPER" \
@@ -352,9 +362,9 @@ require_text 'u-boot-aw2501' \
 require_text 'u-boot-radxa-cubie-a5e' \
     "$STAGE60" \
     "Stage 60 does not provision the Cubie A5E U-Boot package."
-require_text 'stage60-runtime-rootfs-v2-spi-maintenance' \
+require_text 'stage60-runtime-rootfs-v3-field-runtime' \
     "$STAGE60" \
-    "Stage 60 runtime cache schema is missing."
+    "Stage 60 runtime cache schema does not include the field-runtime contract."
 require_text 'NVME_INSTALLER_SELF_TEST=PASS' \
     "$STAGE60" \
     "Stage 60 does not persist the NVMe installer self-test result."
@@ -367,10 +377,53 @@ require_text '99-cubie-a5e-managed-kernel' \
 require_text 'install_update_manager' \
     "$STAGE60" \
     "Stage 60 does not install the signed Cubie update manager."
+require_text \
+    'readonly ADMIN_PATH_PROFILE="/etc/profile.d/cubie-a5e-admin-path.sh"' \
+    "$STAGE60" \
+    "Stage 60 does not define the initbox administrative PATH profile."
+require_text \
+    'Field diagnostics installed: ethtool iw rfkill pciutils nvme-cli util-linux' \
+    "$STAGE60" \
+    "Stage 60 does not record the required field diagnostic package set."
+require_text 'Required field diagnostic command is unavailable:' \
+    "$STAGE60" \
+    "Stage 60 does not validate the required field diagnostic commands."
+require_text "command -v ethtool" "$STAGE60" \
+    "Stage 60 does not validate ethtool in the target runtime."
+require_text "command -v iw" "$STAGE60" \
+    "Stage 60 does not validate iw in the target runtime."
+require_text "command -v rfkill" "$STAGE60" \
+    "Stage 60 does not validate rfkill in the target runtime."
+require_text "command -v blkid" "$STAGE60" \
+    "Stage 60 does not validate blkid in the target runtime."
+require_text "command -v lspci" "$STAGE60" \
+    "Stage 60 does not validate lspci in the target runtime."
+require_text "command -v nvme" "$STAGE60" \
+    "Stage 60 does not validate nvme-cli in the target runtime."
+require_text 'su - '''$INITBOX_USER''' -c' "$STAGE60" \
+    "Stage 60 does not validate the field tools through the initbox login environment."
+require_text \
+    'apt-get             -o Dpkg::Options::=--force-confdef' \
+    "$STAGE60" \
+    "Stage 60 does not retain noninteractive dpkg conffile handling."
 
 # ---------------------------------------------------------------------------
 # NVMe installer: proven boot-chain and rootfs invariants
 # ---------------------------------------------------------------------------
+require_fixed_line \
+    'readonly ADMIN_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+    "$NVME_INSTALLER" \
+    "NVMe installer does not define the deterministic administrative PATH."
+require_fixed_line 'PATH="$ADMIN_PATH"' \
+    "$NVME_INSTALLER" \
+    "NVMe installer does not activate its deterministic administrative PATH."
+require_fixed_line 'export PATH' \
+    "$NVME_INSTALLER" \
+    "NVMe installer does not export its deterministic administrative PATH."
+require_text '[[ "$PATH" == "$ADMIN_PATH" ]]' \
+    "$NVME_INSTALLER" \
+    "NVMe installer self-test does not verify the deterministic administrative PATH."
+
 require_text 'iflag=count_bytes' \
     "$NVME_INSTALLER" \
     "NVMe installer boot-chain prefix copy is missing."
@@ -463,9 +516,9 @@ require_text 'validate_spi_maintenance_runtime' \
 require_text 'validate_runtime_root_layout' \
     "$STAGE80" \
     "Stage 80 lacks persistent runtime mountpoint/PID1 validation."
-require_text 'linux-6.18-lts-validation-v1-20260822' \
+require_text 'linux-6.18-lts-field-runtime-v2-20260822' \
     "$STAGE80" \
-    "Stage 80 revision does not identify the Linux 6.18 LTS validation pass."
+    "Stage 80 revision does not identify the field-runtime Linux 6.18 LTS validation pass."
 require_text 'for exclusion in dev proc run sys tmp mnt media; do' \
     "$STAGE80" \
     "Stage 80 does not inspect the full corrected NVMe rsync exclusion set."
@@ -475,6 +528,25 @@ require_text 'NVME_INSTALLER_SELF_TEST=PASS' \
 require_text 'RADXA_UBOOT_BACKEND=PASS' \
     "$STAGE80" \
     "Stage 80 does not validate the Stage 60 U-Boot backend marker."
+require_text \
+    'readonly ADMIN_PATH_PROFILE="/etc/profile.d/cubie-a5e-admin-path.sh"' \
+    "$STAGE80" \
+    "Stage 80 does not validate the initbox administrative PATH profile."
+require_text \
+    'Field diagnostic commands installed: blkid ethtool iw lspci nvme rfkill' \
+    "$STAGE80" \
+    "Stage 80 validation report does not record all required field commands."
+require_text \
+    'Field diagnostic packages installed: ethtool iw rfkill util-linux pciutils nvme-cli' \
+    "$STAGE80" \
+    "Stage 80 validation report does not record all required field packages."
+require_text \
+    'Ethernet PHY policy: Maxio MAE0621A uses generic PHY on Linux 6.18.45' \
+    "$STAGE80" \
+    "Stage 80 does not document the validated Maxio PHY policy."
+reject_text 'CONFIG_REALTEK_PHY=y' \
+    "$STAGE80" \
+    "Stage 80 still incorrectly requires the Realtek PHY driver for the Maxio PHY hardware."
 
 # ---------------------------------------------------------------------------
 # Output modes / Etcher artifact generation
