@@ -92,7 +92,7 @@ readonly RUNTIME_CACHE_STATE="$RUNTIME_CACHE_DIR/state.env"
 
 if [[ -n "${LOG_DIR:-}" ]]; then
 mkdir -p -- "$LOG_DIR"
-readonly INSTALL_REPORT="$LOG_DIR/linux-6.16-install-report.txt"
+readonly INSTALL_REPORT="$LOG_DIR/managed-kernel-install-report.txt"
 readonly INSTALLED_MODULE_REPORT="$LOG_DIR/installed-modules.txt"
 readonly EXTLINUX_REPORT="$LOG_DIR/extlinux-after-install.conf"
 else
@@ -520,7 +520,7 @@ grep -q '/aic8800_fdrv\.ko$' "$AIC_MODULE_LIST" ||
     die "AIC manifest does not contain aic8800_fdrv.ko"
 
 if grep -q '/aic8800_btlpm\.ko$' "$AIC_MODULE_LIST"; then
-    die "Bluetooth module must not be installed by the Linux 6.16 Wi-Fi stage."
+    die "Bluetooth module must not be installed by the managed-kernel Wi-Fi stage."
 fi
 
 }
@@ -2509,7 +2509,7 @@ grep -Fq "initrd $initrd_path" "$extlinux_file" ||
 grep -Fq "fdtdir $fdtdir_path" "$extlinux_file" ||
     die "Managed DTB directory is incorrect."
 
-linux_616_append="$(
+managed_append="$(
     awk '
         /^[[:space:]]*label[[:space:]]+cubie-a5e[[:space:]]*$/ { inside = 1; next }
         inside && /^[[:space:]]*label[[:space:]]+/ { exit }
@@ -2521,12 +2521,12 @@ linux_616_append="$(
     ' "$extlinux_file"
 )"
 
-[[ -n "$linux_616_append" ]] || die "Managed append line is missing."
-grep -Eq '(^|[[:space:]])console=ttyS0,115200n8([[:space:]]|$)' <<<"$linux_616_append" || die "Managed entry does not use ttyS0."
-grep -Eq '(^|[[:space:]])earlycon=uart8250,mmio32,0x02500000,115200([[:space:]]|$)' <<<"$linux_616_append" || die "Managed earlycon is missing."
-grep -Eq '(^|[[:space:]])ignore_loglevel([[:space:]]|$)' <<<"$linux_616_append" || die "Managed ignore_loglevel is missing."
-grep -Eq '(^|[[:space:]])loglevel=8([[:space:]]|$)' <<<"$linux_616_append" || die "Managed loglevel=8 is missing."
-if grep -Eq '(^|[[:space:]])(console=ttyAS0,115200n8|quiet|splash|loglevel=4)([[:space:]]|$)' <<<"$linux_616_append"; then
+[[ -n "$managed_append" ]] || die "Managed append line is missing."
+grep -Eq '(^|[[:space:]])console=ttyS0,115200n8([[:space:]]|$)' <<<"$managed_append" || die "Managed entry does not use ttyS0."
+grep -Eq '(^|[[:space:]])earlycon=uart8250,mmio32,0x02500000,115200([[:space:]]|$)' <<<"$managed_append" || die "Managed earlycon is missing."
+grep -Eq '(^|[[:space:]])ignore_loglevel([[:space:]]|$)' <<<"$managed_append" || die "Managed ignore_loglevel is missing."
+grep -Eq '(^|[[:space:]])loglevel=8([[:space:]]|$)' <<<"$managed_append" || die "Managed loglevel=8 is missing."
+if grep -Eq '(^|[[:space:]])(console=ttyAS0,115200n8|quiet|splash|loglevel=4)([[:space:]]|$)' <<<"$managed_append"; then
     die "Managed entry still contains vendor or suppressed-console arguments."
 fi
 
@@ -2536,14 +2536,14 @@ if grep -Eq '5\.15\.147-20-aw2501|^[[:space:]]*label[[:space:]]+(l0|l0r)[[:space
 fi
 
 cp -a -- "$extlinux_file" "$EXTLINUX_REPORT"
-rm -f -- "$extlinux_file.before-6.16"
+rm -f -- "$extlinux_file.before-managed-kernel"
 
 }
 
 write_install_report() {
 {
-printf 'Linux 6.16 installation report\n'
-printf '==============================\n'
+printf 'Managed kernel installation report\n'
+printf '==================================\n'
 printf 'Kernel release: %s\n' "$KERNEL_RELEASE"
 printf 'Target device: %s\n' "$TARGET_DEVICE"
 printf 'Root partition: %s\n' "$ROOT_PART"
@@ -2606,7 +2606,7 @@ printf 'Managed Cubie A5E entry default: yes\n'
 }
 
 main() {
-log "Stage 60 revision: spi-maintenance-nvme-cleanlog-v4-20260821"
+log "Stage 60 revision: managed-kernel-lts-ready-v1-20260822"
 require_command awk
 require_command blkid
 require_command chroot
