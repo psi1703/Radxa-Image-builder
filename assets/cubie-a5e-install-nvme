@@ -3,6 +3,13 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
+# Use a deterministic administrative PATH regardless of the invoking user's
+# login environment. This keeps --self-test and runtime command discovery
+# reliable for the normal initbox account as well as root/sudo execution.
+readonly ADMIN_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PATH="$ADMIN_PATH"
+export PATH
+
 readonly PROGRAM_NAME="cubie-a5e-install-nvme"
 readonly LAYOUT_FILE="/etc/cubie-a5e-update/layout.env"
 readonly LOCK_FILE="/run/lock/cubie-a5e-install-nvme.lock"
@@ -99,6 +106,11 @@ self_test() {
         mount mountpoint mv parted partprobe readlink rm rsync sed sgdisk sort
         stat strings sudo swapon sync tr udevadm umount uname wc whiptail wipefs xargs
     )
+
+    [[ "$PATH" == "$ADMIN_PATH" ]] || {
+        printf '%s self-test: unexpected PATH: %s\n' "$PROGRAM_NAME" "$PATH" >&2
+        return 1
+    }
 
     for command_name in "${required_commands[@]}"; do
         command -v "$command_name" >/dev/null 2>&1 || {
