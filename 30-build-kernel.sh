@@ -16,6 +16,8 @@ export STAGE_NAME="KERNEL"
 : "${JOBS:?JOBS is not set}"
 : "${KERNEL_INPUT_FINGERPRINT:?KERNEL_INPUT_FINGERPRINT is not set}"
 : "${KERNEL_REBUILD:=0}"
+: "${LINUX_REF:?LINUX_REF is not set}"
+: "${LINUX_EXPECTED_COMMIT:?LINUX_EXPECTED_COMMIT is not set}"
 
 readonly KERNEL_CONFIG="$KERNEL_DIR/.config"
 readonly SCRIPTS_CONFIG="$KERNEL_DIR/scripts/config"
@@ -32,6 +34,8 @@ readonly MMC_PWRSEQ_SIMPLE_DRIVER="$KERNEL_DIR/drivers/mmc/core/pwrseq_simple.c"
 readonly WENS_REGDB_CERT="$KERNEL_DIR/net/wireless/certs/wens.hex"
 readonly CACHE_DIR="$BUILD_ROOT/cache"
 readonly KERNEL_CACHE_STATE="$CACHE_DIR/kernel-build.env"
+KERNEL_BASE_RELEASE="${LINUX_REF#v}"
+readonly KERNEL_BASE_RELEASE
 
 if [[ -n "${LOG_DIR:-}" ]]; then
     mkdir -p -- "$LOG_DIR"
@@ -162,7 +166,7 @@ if correct_count != 0:
 
 if len(old_conditions) != 1 or len(old_declarations) != 1:
     raise SystemExit(
-        f"{path}: source does not match the known Linux 6.16 "
+        f"{path}: source does not match the known upstream "
         "pwrseq_simple probe implementation"
     )
 
@@ -306,6 +310,19 @@ build_kernel() {
     run make -C "$KERNEL_DIR"         ARCH=arm64         CROSS_COMPILE="$CROSS_COMPILE"         -j"$JOBS"         Image modules dtbs
 }
 
+validate_kernel_source_pin() {
+    local actual_commit
+
+    [[ "$LINUX_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+        die "LINUX_REF must pin an exact point release, got: $LINUX_REF"
+    [[ "$LINUX_EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+        die "LINUX_EXPECTED_COMMIT is not a full 40-character Git commit."
+
+    actual_commit="$(git -C "$KERNEL_DIR" rev-parse HEAD)"
+    [[ "$actual_commit" == "$LINUX_EXPECTED_COMMIT" ]] ||
+        die "Kernel source commit mismatch: expected $LINUX_EXPECTED_COMMIT, got $actual_commit"
+}
+
 determine_kernel_release() {
     KERNEL_RELEASE="$(
         make -s -C "$KERNEL_DIR"             ARCH=arm64             CROSS_COMPILE="$CROSS_COMPILE"             kernelrelease
@@ -315,8 +332,10 @@ determine_kernel_release() {
         die "Could not determine kernel release."
 
     case "$KERNEL_RELEASE" in
-        6.16.0*) ;;
-        *) die "Unexpected kernel release: $KERNEL_RELEASE" ;;
+        "$KERNEL_BASE_RELEASE" | "$KERNEL_BASE_RELEASE"+*) ;;
+        *)
+            die "Unexpected kernel release for $LINUX_REF: $KERNEL_RELEASE"
+            ;;
     esac
 
     printf '%s\n' "$KERNEL_RELEASE" >"$KERNEL_RELEASE_FILE"
@@ -550,7 +569,7 @@ validate_board_dtb() {
     fdtget -p \
         "$BOARD_DTB" \
         /soc/i2c@7081400/pmic@34/regulators/bldo1 |
-        grep -Fxq 'regulator-always-on' ||
+        grep -Fx 'regulator-always-on' >/dev/null ||
         die "Compiled board DTB does not keep BLDO1 enabled."
 
     wifi_interrupt_parent="$(
@@ -587,14 +606,16 @@ write_reports() {
     {
         printf 'Kernel build report\n'
         printf '===================\n'
+        printf 'Kernel source ref: %s\n' "$LINUX_REF"
+        printf 'Kernel source commit: %s\n' "$LINUX_EXPECTED_COMMIT"
         printf 'Kernel release: %s\n' "$KERNEL_RELEASE"
         printf 'Kernel input fingerprint: %s\n' "$KERNEL_INPUT_FINGERPRINT"
         printf 'Validated kernel cache reused: %s\n' "$KERNEL_CACHE_REUSED"
         printf 'Kernel directory: %s\n' "$KERNEL_DIR"
         printf 'Kernel Image: %s\n' "$KERNEL_IMAGE"
         printf 'Board DTB: %s\n' "$BOARD_DTB"
-        printf 'PCIe root complex: Allwinner v210, Gen2 x1, built in\n'
-        printf 'PCIe combo PHY: Innosilicon, built in\n'
+        printf 'PCIe root complex: Allwinner v210, Gen2 x1, module\n'
+        printf 'PCIe combo PHY: Innosilicon, module\n'
         printf 'NVMe host driver: built in\n'
         printf 'Ethernet PHY driver: Realtek enabled; unused Microsemi VSC85xx driver disabled\n'
         printf 'A523 SPI0 controller driver: built in\n'
@@ -643,8 +664,9 @@ main() {
     require_nonempty_file "$SPI_DRIVER"
     require_nonempty_file "$WENS_REGDB_CERT"
 
-    log "Kernel build stage starting."
+    log "Kernel build stage starting for $LINUX_REF."
 
+    validate_kernel_source_pin
     determine_kernel_release
 
     if validated_kernel_cache_available; then
