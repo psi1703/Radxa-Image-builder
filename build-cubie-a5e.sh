@@ -107,6 +107,7 @@ export LINUX_REPOSITORY LINUX_REF LINUX_EXPECTED_COMMIT
 export BSP_REPOSITORY BSP_REF BSP_EXPECTED_COMMIT
 export AIC_REPOSITORY AIC_REF AIC_EXPECTED_COMMIT
 export STOCK_IMAGE_URL STOCK_IMAGE_SHA512
+export CUBIE_APT_REPO_URL CUBIE_BOARD_SUPPORT_VERSION
 export TARGET_DEVICE
 export CROSS_COMPILE JOBS CONFIRM_WRITE BUILD_ID LOG_ROOT LOG_DIR
 export BUILD_LOG COMMAND_LOG ENVIRONMENT_LOG STAGE_LOG FAILURE_LOG
@@ -128,6 +129,7 @@ stages+=(
     "30-build-kernel.sh"
     "40-build-aic8800.sh"
     "45-build-update-bundle.sh"
+    "46-build-apt-update-repository.sh"
 )
 
 if [[ "$BUILD_MODE" == "image" ]]; then
@@ -364,11 +366,35 @@ on_signal() {
     exit 130
 }
 
+cleanup_failed_image_output() {
+    local artifact
+    local output_dir_real
+
+    [[ "$BUILD_MODE" == "image" && "$OUTPUT_MODE" == "etcher-image" ]] || return 0
+
+    output_dir_real="$(safe_realpath "$IMAGE_OUTPUT_DIR")"
+    [[ "$output_dir_real" == "/home/psi" ]] || return 0
+
+    for artifact in "$IMAGE_RAW" "$IMAGE_OUTPUT" "$IMAGE_OUTPUT.sha256"; do
+        [[ -e "$artifact" || -L "$artifact" ]] || continue
+        if [[ -L "$artifact" ]]; then
+            printf '[x] Refusing to remove failed-build symlink artifact: %s\n' "$artifact" >&2
+            continue
+        fi
+        [[ "$(dirname -- "$(safe_realpath "$artifact")")" == "$output_dir_real" ]] || continue
+        printf '[x] Removing failed image artifact: %s\n' "$artifact" >&2
+        rm -f -- "$artifact"
+    done
+}
+
 on_exit() {
     local exit_code="$?"
     local elapsed
 
     detach_image_loop 0
+    if ((BUILD_SUCCEEDED == 0)); then
+        cleanup_failed_image_output
+    fi
     release_build_lock
     elapsed=$(($(date +%s) - BUILD_START_EPOCH))
 
@@ -486,6 +512,7 @@ install_required_host_packages() {
         debootstrap
         device-tree-compiler
         diffutils
+        dpkg-dev
         dwarves
         e2fsprogs
         file
@@ -493,6 +520,8 @@ install_required_host_packages() {
         gcc-aarch64-linux-gnu
         gdisk
         git
+        gnupg
+        gzip
         kmod
         libelf-dev
         libssl-dev
@@ -554,7 +583,7 @@ install_required_host_packages() {
 
 require_host_commands() {
     local commands=(
-        awk bash blockdev date df dtc findmnt flock grep head lsblk make
+        awk bash blockdev date df dpkg-deb dpkg-scanpackages dtc findmnt flock gpg grep gzip head lsblk make
         mountpoint nproc pahole readlink rm sed sgdisk sha256sum sort sync tee udevadm umount
     )
     local command_name
@@ -1104,6 +1133,9 @@ main() {
     log "Kernel cache fingerprint: $KERNEL_INPUT_FINGERPRINT"
     log "AIC8800 cache fingerprint: $AIC_INPUT_FINGERPRINT"
     log "Signed update bundle: $(<"$BUILD_ROOT/.one-shot-update-bundle")"
+    log "Board-support package: $(<"$BUILD_ROOT/.one-shot-board-support-package")"
+    log "APT update package: $(<"$BUILD_ROOT/.one-shot-apt-package")"
+    log "Signed APT repository: $(<"$BUILD_ROOT/.one-shot-apt-repository")"
     log "Expected interfaces: GMAC0=eth0, GMAC1=eth1, AIC8800=wlan0"
 
     if [[ "$BUILD_MODE" == "image" && "$OUTPUT_MODE" == "device" ]]; then
